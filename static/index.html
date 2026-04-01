@@ -1,1 +1,1087 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"/>
+<title>AXIFLOW</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#040507;
+  --g1:rgba(255,255,255,.042);
+  --g2:rgba(255,255,255,.075);
+  --b1:rgba(255,255,255,.07);
+  --b2:rgba(255,255,255,.14);
+  --b3:rgba(255,255,255,.22);
+  --silver:#c2c8d8;--s2:#858fa5;--s3:#3e4659;
+  --white:#edf0f8;
+  --long:#3ddc84;--longd:rgba(61,220,132,.12);--longb:rgba(61,220,132,.22);
+  --short:#ff6b6b;--shortd:rgba(255,107,107,.12);--shortb:rgba(255,107,107,.22);
+  --warn:#f5a623;--blue:#5b9cf6;--purple:#9b7fe8;
+  --mono:'JetBrains Mono',monospace;
+  --sans:'Outfit',sans-serif;
+  --r:18px;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;-webkit-font-smoothing:antialiased}
+html,body{height:100%;background:var(--bg);overflow:hidden}
+body{font-family:var(--sans);color:var(--white)}
+::-webkit-scrollbar{display:none}
+*{scrollbar-width:none}
+input,select,button,textarea{font-family:var(--sans)}
+
+/* ── LAYOUT ── */
+#app{height:100vh;display:flex;flex-direction:column;position:relative}
+#content{flex:1;overflow-y:auto;overflow-x:hidden;padding-bottom:78px}
+.pad{padding:14px 14px 0}
+.anim{animation:fadeUp .3s ease both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── NOISE ── */
+.noise::after{content:'';position:absolute;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");
+  background-size:300px;pointer-events:none;z-index:0;border-radius:inherit}
+
+/* ── GLASS ── */
+.glass{
+  background:var(--g1);
+  border:1px solid var(--b1);
+  border-radius:var(--r);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+  position:relative;overflow:hidden;
+}
+.glass>.inner{position:relative;z-index:1}
+
+/* ── HEADER ── */
+.hdr{
+  background:rgba(4,5,7,.88);
+  border-bottom:1px solid var(--b1);
+  padding:13px 16px 11px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;position:relative;z-index:50;
+  backdrop-filter:blur(30px);
+}
+.logo-box{
+  width:38px;height:38px;border-radius:13px;
+  background:linear-gradient(145deg,rgba(255,255,255,.1),rgba(255,255,255,.03));
+  border:1px solid var(--b2);
+  display:grid;place-items:center;flex-shrink:0;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+}
+.brand{margin-left:10px}
+.brand-name{
+  font-size:17px;font-weight:900;letter-spacing:.8px;
+  background:linear-gradient(135deg,var(--white),var(--s2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.brand-sub{font-size:9px;color:var(--s3);font-family:var(--mono);letter-spacing:1.4px;text-transform:uppercase;margin-top:1px}
+.agent-pill{
+  display:flex;align-items:center;gap:6px;
+  background:rgba(255,255,255,.04);border:1px solid var(--b1);
+  border-radius:20px;padding:6px 13px;cursor:pointer;
+  transition:all .2s;
+}
+.agent-pill:hover{border-color:var(--b2)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--s3);transition:all .3s}
+.dot.on{background:var(--long);box-shadow:0 0 8px var(--long);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.28}}
+.pill-lbl{font-size:10px;font-family:var(--mono);color:var(--s2);letter-spacing:.5px}
+
+/* ── NAV ── */
+.nav{
+  position:fixed;bottom:0;left:0;right:0;z-index:100;
+  background:rgba(4,5,7,.92);
+  border-top:1px solid var(--b1);
+  display:flex;
+  padding-bottom:env(safe-area-inset-bottom);
+  backdrop-filter:blur(30px);
+}
+.nb{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  padding:10px 0 9px;gap:4px;background:none;border:none;
+  color:var(--s3);font-size:9px;font-family:var(--sans);
+  text-transform:uppercase;letter-spacing:.5px;cursor:pointer;
+  transition:color .2s;position:relative;
+}
+.nb.on{color:var(--silver)}
+.nb.on::before{content:'';position:absolute;top:0;left:20%;right:20%;
+  height:1.5px;background:linear-gradient(90deg,transparent,var(--silver),transparent);border-radius:1px}
+.nb svg{width:20px;height:20px}
+
+/* ── SECTION LABEL ── */
+.slbl{font-size:10px;color:var(--s3);text-transform:uppercase;letter-spacing:1.2px;
+  margin-bottom:8px;font-family:var(--mono)}
+
+/* ── BALANCE CARD ── */
+.bal-card{
+  background:linear-gradient(145deg,rgba(255,255,255,.06),rgba(255,255,255,.02));
+  border:1px solid var(--b2);border-radius:22px;padding:22px;margin-bottom:14px;
+  position:relative;overflow:hidden;
+}
+.bal-orb1{position:absolute;top:-70px;right:-50px;width:200px;height:200px;border-radius:50%;
+  background:radial-gradient(circle,rgba(91,156,246,.07),transparent 70%);pointer-events:none}
+.bal-orb2{position:absolute;bottom:-50px;left:-30px;width:150px;height:150px;border-radius:50%;
+  background:radial-gradient(circle,rgba(155,127,232,.05),transparent 70%);pointer-events:none}
+.bal-lbl{font-size:10px;color:var(--s3);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:5px;font-family:var(--mono)}
+.bal-amt{
+  font-family:var(--mono);font-size:36px;font-weight:700;line-height:1;margin-bottom:5px;
+  background:linear-gradient(135deg,var(--white) 0%,var(--s2) 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.bal-sub{font-size:12px;margin-bottom:18px;font-family:var(--mono);letter-spacing:.3px}
+.bal-btns{display:flex;gap:8px}
+.bal-btn{
+  flex:1;display:flex;align-items:center;justify-content:center;gap:5px;
+  background:rgba(255,255,255,.05);border:1px solid var(--b1);border-radius:12px;
+  padding:9px 5px;font-size:11px;color:var(--silver);cursor:pointer;
+  transition:all .2s;letter-spacing:.2px;font-weight:500;
+}
+.bal-btn:hover{background:rgba(255,255,255,.09);border-color:var(--b2)}
+
+/* ── SIG CARD ── */
+.sig{
+  background:var(--g1);border:1px solid var(--b1);border-radius:16px;
+  padding:14px 15px;display:flex;align-items:center;justify-content:space-between;
+  cursor:pointer;margin-bottom:8px;position:relative;overflow:hidden;
+  transition:border-color .2s,background .2s;
+}
+.sig:hover{background:var(--g2);border-color:var(--b2)}
+.sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2.5px;border-radius:0 2px 2px 0}
+.sig.long::before{background:var(--long);box-shadow:2px 0 12px rgba(61,220,132,.3)}
+.sig.short::before{background:var(--short);box-shadow:2px 0 12px rgba(255,107,107,.3)}
+.sig.nt::before{background:var(--s3)}
+.sig-sym{font-size:13px;font-weight:600;margin-bottom:3px;letter-spacing:.3px}
+.sig-price{font-size:11px;color:var(--s2);font-family:var(--mono)}
+.badge{display:inline-block;padding:3px 11px;border-radius:8px;
+  font-size:10px;font-weight:700;font-family:var(--mono);letter-spacing:.5px;margin-bottom:4px}
+.badge.bl{background:var(--longd);color:var(--long);border:1px solid var(--longb)}
+.badge.bs{background:var(--shortd);color:var(--short);border:1px solid var(--shortb)}
+.badge.bn{background:rgba(62,70,89,.2);color:var(--s3);border:1px solid var(--b1)}
+.conf-bar{width:58px;height:2px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden;margin:3px 0 0 auto}
+.cf{height:100%;border-radius:2px;transition:width .5s}
+
+/* ── CHART ── */
+.chart-wrap{background:var(--g1);border:1px solid var(--b1);border-radius:var(--r);padding:14px;margin-bottom:12px}
+.chart-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.tf-tabs{display:flex;gap:4px}
+.tf-btn{padding:3px 10px;border-radius:8px;font-size:9px;font-family:var(--mono);cursor:pointer;
+  border:1px solid var(--b1);background:none;color:var(--s3);transition:all .2s;letter-spacing:.5px;font-weight:600}
+.tf-btn.on{background:rgba(255,255,255,.09);border-color:var(--b2);color:var(--silver)}
+canvas{display:block;width:100% !important}
+
+/* ── MKT TILES ── */
+.mkt-g{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.mkt-t{background:var(--g1);border:1px solid var(--b1);border-radius:14px;padding:12px 13px;position:relative;overflow:hidden}
+.mt-n{font-size:9px;color:var(--s3);text-transform:uppercase;letter-spacing:.9px;margin-bottom:6px;font-family:var(--mono)}
+.mt-v{font-size:18px;font-weight:700;font-family:var(--mono);margin-bottom:3px}
+.mt-s{font-size:10px;color:var(--s3);margin-bottom:6px}
+.mt-bar{height:2px;background:rgba(255,255,255,.05);border-radius:2px;overflow:hidden}
+.mt-fill{height:100%;border-radius:2px;transition:width .4s}
+
+/* ── GAUGE ── */
+.gauge-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.gauge-lbl{width:80px;font-size:10px;color:var(--s2);font-family:var(--mono);flex-shrink:0;letter-spacing:.3px}
+.gauge-track{flex:1;height:3px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden}
+.gauge-fill{height:100%;border-radius:2px;transition:width .5s}
+.gauge-val{width:52px;font-size:10px;font-family:var(--mono);text-align:right;flex-shrink:0}
+
+/* ── TPSL BOX ── */
+.tpsl{background:rgba(91,156,246,.05);border:1px solid rgba(91,156,246,.14);border-radius:14px;padding:13px 15px;margin-bottom:11px}
+.tpsl-title{font-size:9px;color:var(--blue);font-family:var(--mono);text-transform:uppercase;letter-spacing:.9px;margin-bottom:9px}
+.tpsl-row{display:flex;justify-content:space-between;padding:3px 0;font-family:var(--mono);font-size:12px;border-bottom:1px solid rgba(255,255,255,.04)}
+.tpsl-row:last-child{border-bottom:none}
+.tpsl-lbl{color:var(--s3)}
+
+/* ── REASONS ── */
+.reason-item{display:flex;gap:9px;padding:5px 0;font-size:12px;color:var(--s2);line-height:1.5;
+  border-bottom:1px solid rgba(255,255,255,.04)}
+.reason-item:last-child{border-bottom:none}
+.rdot{width:5px;height:5px;border-radius:50%;flex-shrink:0;margin-top:5px}
+
+/* ── FORM ── */
+.fl{font-size:10px;color:var(--s3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;display:block;font-family:var(--mono)}
+.fi{width:100%;background:rgba(255,255,255,.04);border:1px solid var(--b1);border-radius:12px;
+  padding:10px 13px;color:var(--white);font-size:13px;outline:none;transition:border-color .2s}
+.fi:focus{border-color:var(--b2)}
+.fr{margin-bottom:12px}
+.f2{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px}
+
+/* ── RANGE ── */
+.rng{width:100%;-webkit-appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer}
+.rng::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--white);cursor:pointer;box-shadow:0 0 8px rgba(255,255,255,.25)}
+.rl{display:flex;justify-content:space-between;font-size:10px;color:var(--s3);margin-top:5px;font-family:var(--mono)}
+
+/* ── BTNS ── */
+.btn{width:100%;padding:13px 16px;border-radius:14px;border:none;font-size:13px;font-weight:600;
+  cursor:pointer;font-family:var(--sans);letter-spacing:.3px;transition:all .2s}
+.btn+.btn{margin-top:9px}
+.btn:active{transform:scale(.98)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sv{background:rgba(255,255,255,.06);border:1px solid var(--b2);color:var(--white)}
+.btn-sv:hover{background:rgba(255,255,255,.1)}
+.btn-long{background:var(--longd);border:1px solid var(--longb);color:var(--long)}
+.btn-short{background:var(--shortd);border:1px solid var(--shortb);color:var(--short)}
+.btn-danger{background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.2);color:var(--short)}
+.btn-ghost{background:none;border:1px solid var(--b1);color:var(--s2)}
+.btn-ghost:hover{border-color:var(--b2);color:var(--silver)}
+
+/* ── SIDE TABS ── */
+.stabs{display:flex;border:1px solid var(--b1);border-radius:14px;overflow:hidden;margin-bottom:14px}
+.stab{flex:1;padding:12px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:var(--sans);transition:all .2s}
+.stab.buy.on{background:var(--longd);color:var(--long)}
+.stab.sell.on{background:var(--shortd);color:var(--short)}
+.stab:not(.on){background:rgba(255,255,255,.02);color:var(--s3)}
+
+/* ── LOG ── */
+.log-box{background:rgba(255,255,255,.02);border:1px solid var(--b1);border-radius:13px;
+  padding:10px 13px;max-height:190px;overflow-y:auto;font-family:var(--mono);font-size:10.5px;line-height:1.9}
+
+/* ── STATS ── */
+.stats-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.stat-box{background:var(--g1);border:1px solid var(--b1);border-radius:14px;padding:13px;text-align:center}
+.stat-v{font-size:22px;font-weight:700;font-family:var(--mono);margin-bottom:3px}
+.stat-l{font-size:9px;color:var(--s3);text-transform:uppercase;letter-spacing:.8px}
+
+/* ── TRADE CARD ── */
+.trade-c{background:var(--g1);border:1px solid var(--b1);border-radius:14px;padding:13px;margin-bottom:8px}
+
+/* ── ORDER SUM ── */
+.os{background:rgba(255,255,255,.03);border:1px solid var(--b1);border-radius:13px;padding:12px 14px;margin-bottom:14px;font-family:var(--mono);font-size:12px}
+.os-r{display:flex;justify-content:space-between;padding:4px 0}
+.os-l{color:var(--s3)}
+
+/* ── AMD BADGE ── */
+.amd-b{display:inline-flex;align-items:center;gap:5px;background:rgba(155,127,232,.1);
+  border:1px solid rgba(155,127,232,.2);border-radius:8px;padding:3px 10px;
+  font-size:10px;font-family:var(--mono);color:var(--purple)}
+
+/* ── NOTICE ── */
+.notice{background:rgba(91,156,246,.05);border:1px solid rgba(91,156,246,.13);
+  border-radius:12px;padding:12px 14px;font-size:11.5px;color:var(--s2);line-height:1.7;margin-bottom:13px}
+.notice b{color:var(--blue)}
+
+/* ── CONN OK ── */
+.conn-ok{background:rgba(61,220,132,.05);border:1px solid rgba(61,220,132,.18);
+  border-radius:12px;padding:13px;font-size:12px;font-family:var(--mono);
+  color:var(--long);margin-top:10px;display:none;animation:fadeUp .3s ease}
+
+/* ── TOAST ── */
+.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-70px);
+  background:rgba(10,12,18,.95);border:1px solid var(--b2);border-radius:13px;
+  padding:10px 20px;font-size:12px;font-weight:500;z-index:999;white-space:nowrap;
+  transition:transform .3s;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+.toast.in{transform:translateX(-50%) translateY(0)}
+
+/* ── SKELETON ── */
+.sk{background:linear-gradient(90deg,var(--g1) 25%,rgba(255,255,255,.06) 50%,var(--g1) 75%);
+  background-size:200% 100%;animation:sh 1.5s infinite;border-radius:12px}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* ── AMBIENT ── */
+.ambient{position:fixed;pointer-events:none;border-radius:50%;z-index:0}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- Ambient glows -->
+<div class="ambient" style="top:-100px;left:50%;transform:translateX(-50%);width:500px;height:200px;background:radial-gradient(ellipse,rgba(91,156,246,.04),transparent 70%)"></div>
+
+<!-- HEADER -->
+<header class="hdr">
+  <div style="display:flex;align-items:center">
+    <div class="logo-box">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="rgba(194,200,216,.8)" stroke-width="1.5">
+        <polygon points="12 2 22 7 22 17 12 22 2 17 2 7"/>
+        <line x1="12" y1="2" x2="12" y2="22"/>
+        <line x1="2" y1="7" x2="22" y2="7"/>
+        <line x1="2" y1="17" x2="22" y2="17"/>
+      </svg>
+    </div>
+    <div class="brand">
+      <div class="brand-name">AXIFLOW</div>
+      <div class="brand-sub">Smart Money · v1.0</div>
+    </div>
+  </div>
+  <div class="agent-pill" id="agentPill" onclick="goTab('agent')">
+    <div class="dot" id="agentDot"></div>
+    <span class="pill-lbl" id="pillLbl">AGENT</span>
+  </div>
+</header>
+
+<div id="content">
+
+<!-- ══ WALLET ══ -->
+<div class="tab anim" id="tab-wallet">
+<div class="pad">
+
+  <div class="bal-card noise">
+    <div class="bal-orb1"></div><div class="bal-orb2"></div>
+    <div style="position:relative;z-index:1">
+      <div class="bal-lbl">Total Balance</div>
+      <div class="bal-amt" id="balAmt">$ ——</div>
+      <div class="bal-sub" id="balSub" style="color:var(--s3)">Підключіть гаманець</div>
+      <div class="bal-btns">
+        <button class="bal-btn" onclick="goTab('settings')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Депозит
+        </button>
+        <button class="bal-btn" onclick="goTab('trade')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
+          Торгувати
+        </button>
+        <button class="bal-btn" onclick="goTab('agent')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>
+          Агент
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="slbl">Сигнали · Live</div>
+  <div id="sigGrid">
+    <div class="sk" style="height:66px;margin-bottom:8px"></div>
+    <div class="sk" style="height:66px;margin-bottom:8px"></div>
+    <div class="sk" style="height:66px"></div>
+  </div>
+
+  <div class="slbl" style="margin-top:14px">Графік</div>
+  <div class="chart-wrap">
+    <div class="chart-hdr">
+      <div style="font-size:13px;font-weight:600;letter-spacing:.3px" id="chartSym">BTC/USDT</div>
+      <div class="tf-tabs">
+        <button class="tf-btn on" onclick="setTf('5m',this)">5M</button>
+        <button class="tf-btn" onclick="setTf('1h',this)">1H</button>
+        <button class="tf-btn" onclick="setTf('4h',this)">4H</button>
+      </div>
+    </div>
+    <canvas id="mainChart" height="132"></canvas>
+  </div>
+
+  <div class="slbl">Smart Money · <span id="mktSym" style="color:var(--silver)">BTC/USDT</span></div>
+  <div class="mkt-g" id="mktGrid">
+    <div class="sk" style="height:78px"></div><div class="sk" style="height:78px"></div>
+    <div class="sk" style="height:78px"></div><div class="sk" style="height:78px"></div>
+  </div>
+
+</div>
+</div>
+
+<!-- ══ DETAIL ══ -->
+<div class="tab anim" id="tab-detail" style="display:none">
+<div class="pad">
+  <div style="display:flex;align-items:center;gap:11px;margin-bottom:15px">
+    <button onclick="goTab('wallet')" style="background:rgba(255,255,255,.05);border:1px solid var(--b1);border-radius:11px;width:35px;height:35px;display:grid;place-items:center;cursor:pointer;color:var(--s2);font-size:19px">‹</button>
+    <div>
+      <div style="font-size:15px;font-weight:700;letter-spacing:.3px" id="detSym">—</div>
+      <div style="font-size:10px;color:var(--s3);font-family:var(--mono)" id="detStrat">—</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:9px;margin-bottom:13px">
+    <span class="badge" id="detBadge">—</span>
+    <span id="detAmd" class="amd-b" style="display:none">⚡ AMD/FVG</span>
+    <span style="margin-left:auto;font-size:11px;color:var(--s3);font-family:var(--mono)">
+      Конф: <span id="detConf" style="color:var(--silver)">—</span>%
+    </span>
+  </div>
+  <div class="tpsl" id="detTpSl">
+    <div class="tpsl-title">Параметри угоди · RR 1:4</div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Вхід</span><span id="detEntry">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Take Profit</span><span id="detTp" style="color:var(--long)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Stop Loss</span><span id="detSl" style="color:var(--short)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Risk / Reward</span><span id="detRr" style="color:var(--blue)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Плече (рекомендовано)</span><span id="detLev" style="color:var(--warn)">—</span></div>
+  </div>
+  <div class="glass" style="padding:14px 16px;margin-bottom:11px">
+    <div class="inner">
+      <div class="slbl">Score Breakdown</div>
+      <div id="gaugeRows"></div>
+    </div>
+  </div>
+  <div class="glass" style="padding:14px 16px;margin-bottom:11px" id="detReasons">
+    <div class="inner"><div class="slbl">Причини сигналу</div></div>
+  </div>
+  <div class="mkt-g" id="detMkt"></div>
+  <button class="btn btn-sv" onclick="goTab('trade')">Торгувати цим сигналом →</button>
+  <div style="height:14px"></div>
+</div>
+</div>
+
+<!-- ══ AGENT ══ -->
+<div class="tab anim" id="tab-agent" style="display:none">
+<div class="pad">
+
+  <div class="glass" style="padding:18px;margin-bottom:12px">
+    <div class="inner">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:5px;font-size:14px;font-weight:700">
+        ◎ AI Агент
+        <span id="agentBadge" style="font-size:10px;background:rgba(255,255,255,.04);padding:2px 10px;border-radius:7px;color:var(--s3);font-family:var(--mono);margin-left:auto">OFFLINE</span>
+      </div>
+      <div style="font-size:12px;color:var(--s3);line-height:1.7;margin-bottom:15px">
+        Сканує 15+ пар безперервно. Відкриває угоди коли бачить сигнал — не за таймером, а за ринковими умовами. RR = 1:4 завжди.
+      </div>
+      <div class="f2">
+        <div class="fr" style="margin:0">
+          <label class="fl">Ризик / угода %</label>
+          <input class="fi" type="number" id="riskPct" value="1.5" min="0.5" max="10" step="0.5"/>
+        </div>
+        <div class="fr" style="margin:0">
+          <label class="fl">Макс. угод</label>
+          <select class="fi" id="maxOpen"><option>1</option><option selected>3</option><option>5</option></select>
+        </div>
+      </div>
+      <div style="margin-top:13px">
+        <label class="fl">Мін. конфіденційність: <span id="confV" style="color:var(--silver);font-family:var(--mono)">70%</span></label>
+        <input type="range" class="rng" id="confRng" min="55" max="90" value="70"
+          style="background:linear-gradient(to right,var(--blue) 0%,var(--blue) 43%,rgba(255,255,255,.1) 43%)"
+          oninput="updConf(this)"/>
+        <div class="rl"><span>55%</span><span>90%</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats-g">
+    <div class="stat-box"><div class="stat-v" id="stOpen">0</div><div class="stat-l">Відкрито</div></div>
+    <div class="stat-box"><div class="stat-v" id="stWr" style="color:var(--long)">—%</div><div class="stat-l">Win Rate</div></div>
+    <div class="stat-box"><div class="stat-v" id="stPnl">$0</div><div class="stat-l">PnL</div></div>
+  </div>
+
+  <button class="btn btn-sv" id="agentStartBtn" onclick="startAgent()">▶ Запустити AXIFLOW Agent</button>
+  <button class="btn btn-danger" id="agentStopBtn" onclick="stopAgent()" style="display:none">■ Зупинити агента</button>
+  <button class="btn btn-ghost" id="scanBtn" onclick="doScan()" style="margin-top:9px">⟳ Сканувати зараз</button>
+
+  <div class="slbl" style="margin:14px 0 7px">Agent Log</div>
+  <div class="log-box" id="agentLog">
+    <div><span style="color:var(--s3)">[--:--:--]</span> <span style="color:var(--blue)">Очікування запуску...</span></div>
+  </div>
+
+  <div id="openTradesWrap">
+    <div class="slbl" style="margin:14px 0 7px">Відкриті угоди</div>
+    <div id="openTrades"><div style="text-align:center;font-size:12px;color:var(--s3);padding:18px 0">Немає відкритих угод</div></div>
+  </div>
+
+</div>
+</div>
+
+<!-- ══ TRADE ══ -->
+<div class="tab anim" id="tab-trade" style="display:none">
+<div class="pad">
+
+  <div class="stabs">
+    <button class="stab buy on" id="tabBuy" onclick="setSide('buy')">▲ Long</button>
+    <button class="stab sell" id="tabSell" onclick="setSide('sell')">▼ Short</button>
+  </div>
+
+  <div class="fr">
+    <label class="fl">Пара</label>
+    <select class="fi" id="tradeSym" onchange="updCalc()">
+      <option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option>
+      <option>BNBUSDT</option><option>XRPUSDT</option><option>ADAUSDT</option>
+      <option>DOGEUSDT</option><option>AVAXUSDT</option><option>DOTUSDT</option><option>LINKUSDT</option>
+    </select>
+  </div>
+  <div class="f2">
+    <div class="fr" style="margin:0">
+      <label class="fl">Тип ордера</label>
+      <select class="fi" id="orderType"><option value="market">Market</option><option value="limit">Limit</option></select>
+    </div>
+    <div class="fr" style="margin:0">
+      <label class="fl">Плече</label>
+      <select class="fi" id="tradeLev" onchange="updCalc()">
+        <option value="1">1x</option><option value="2">2x</option><option value="3">3x</option>
+        <option value="5">5x</option><option value="10">10x</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="fr">
+    <label class="fl">Сума USDT: <span id="tradeAmtLbl" style="color:var(--silver);font-family:var(--mono)">$100</span></label>
+    <input type="range" class="rng" id="tradeAmt" min="10" max="5000" step="10" value="100"
+      style="background:linear-gradient(to right,var(--blue) 0%,var(--blue) 1.8%,rgba(255,255,255,.1) 1.8%)"
+      oninput="updAmt(this)"/>
+    <div class="rl"><span>$10</span><span>$1,000</span><span>$5,000</span></div>
+  </div>
+
+  <!-- AI Signal for pair -->
+  <div id="tradeSignalBox" class="tpsl" style="display:none">
+    <div class="tpsl-title">AI Сигнал по вибраній парі</div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Рішення</span><span id="tsSig">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Take Profit</span><span id="tsTp" style="color:var(--long)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Stop Loss</span><span id="tsSl" style="color:var(--short)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">Плече рекомендовано</span><span id="tsLev" style="color:var(--warn)">—</span></div>
+    <div class="tpsl-row"><span class="tpsl-lbl">RR</span><span id="tsRr" style="color:var(--blue)">—</span></div>
+  </div>
+
+  <div class="os">
+    <div class="os-r"><span class="os-l">Поточна ціна</span><span id="osPrice">—</span></div>
+    <div class="os-r"><span class="os-l">Кількість монет</span><span id="osQty">—</span></div>
+    <div class="os-r"><span class="os-l">Розмір позиції</span><span id="osPos">—</span></div>
+    <div class="os-r"><span class="os-l">Комісія ~0.04%</span><span id="osFee">—</span></div>
+  </div>
+
+  <button class="btn" id="execBtn" onclick="execTrade()">Відкрити позицію</button>
+  <div style="height:14px"></div>
+
+</div>
+</div>
+
+<!-- ══ SETTINGS ══ -->
+<div class="tab anim" id="tab-settings" style="display:none">
+<div class="pad">
+
+  <div class="glass" style="padding:18px;margin-bottom:12px">
+    <div class="inner">
+      <div style="font-size:15px;font-weight:700;margin-bottom:5px">⚙ API Підключення</div>
+      <div style="font-size:12px;color:var(--s3);line-height:1.7;margin-bottom:14px">
+        Для демо — просто натисни "Підключити" без API ключів.<br>
+        Для реальної торгівлі — вкажи ключі біржі.
+      </div>
+
+      <div class="notice">
+        <b>Bybit API ключі:</b><br>
+        1. bybit.com → Профіль → API Management<br>
+        2. Create New Key → System-generated<br>
+        3. ✅ Read  ✅ Trade  ❌ Withdraw (заборони!)<br>
+        4. Збережи Key та Secret
+      </div>
+
+      <div class="fr">
+        <label class="fl">Режим підключення</label>
+        <select class="fi" id="connMode">
+          <option value="demo">🧪 Демо (без API)</option>
+          <option value="bybit">Bybit</option>
+          <option value="binance">Binance Futures</option>
+          <option value="both">Bybit + Binance</option>
+        </select>
+      </div>
+
+      <div id="bybitFields">
+        <div class="fr">
+          <label class="fl">Bybit API Key</label>
+          <input class="fi" type="text" id="bybitKey" placeholder="Вставте Bybit API Key" autocomplete="off"/>
+        </div>
+        <div class="fr">
+          <label class="fl">Bybit API Secret</label>
+          <input class="fi" type="password" id="bybitSec" placeholder="••••••••" autocomplete="off"/>
+        </div>
+      </div>
+
+      <div id="binanceFields" style="display:none">
+        <div class="fr">
+          <label class="fl">Binance API Key</label>
+          <input class="fi" type="text" id="binanceKey" placeholder="Вставте Binance API Key" autocomplete="off"/>
+        </div>
+        <div class="fr">
+          <label class="fl">Binance API Secret</label>
+          <input class="fi" type="password" id="binanceSec" placeholder="••••••••" autocomplete="off"/>
+        </div>
+      </div>
+
+      <div class="fr">
+        <label class="fl">Мережа</label>
+        <select class="fi" id="netMode">
+          <option value="true">🧪 Testnet — безпечно</option>
+          <option value="false">🔴 Mainnet — реальні гроші</option>
+        </select>
+      </div>
+      <div class="fr">
+        <label class="fl">Початковий баланс (для демо)</label>
+        <input class="fi" type="number" id="initBal" value="10000" min="100"/>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn btn-sv" onclick="connectWallet()">Підключити →</button>
+  <div class="conn-ok" id="connOk"></div>
+  <div style="height:14px"></div>
+
+</div>
+</div>
+
+</div><!-- /content -->
+
+<!-- NAV -->
+<nav class="nav">
+  <button class="nb on" id="nb-wallet" onclick="goTab('wallet')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M16 3H8a2 2 0 0 0-2 2v2h12V5a2 2 0 0 0-2-2z"/><circle cx="18" cy="14" r="1.5" fill="currentColor"/></svg>
+    Гаманець
+  </button>
+  <button class="nb" id="nb-agent" onclick="goTab('agent')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+    Агент
+  </button>
+  <button class="nb" id="nb-trade" onclick="goTab('trade')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+    Торгівля
+  </button>
+  <button class="nb" id="nb-settings" onclick="goTab('settings')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    API
+  </button>
+</nav>
+
+<div class="toast" id="toast"></div>
+</div>
+
+<script>
+// ══════════════════════════════════════════
+const tg=window.Telegram?.WebApp;
+if(tg){tg.ready();tg.expand();tg.setHeaderColor('#040507');tg.setBackgroundColor('#040507');}
+const UID=tg?.initDataUnsafe?.user?.id?.toString()||'user_'+Date.now();
+const API=window.location.origin;
+
+// ══ STATE ══
+let S={
+  tab:'wallet',signals:{},prices:{},
+  activeSym:'BTCUSDT',tf:'5m',candles:[],
+  balance:null,connected:false,
+  tradeSide:'buy',agentOn:false,
+};
+
+// ══ NAV ══
+function goTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.style.display='none');
+  document.querySelectorAll('.nb').forEach(b=>b.classList.remove('on'));
+  const t=document.getElementById('tab-'+name);
+  if(t){t.style.display='block';t.classList.add('anim');setTimeout(()=>t.classList.remove('anim'),400);}
+  const nb=document.getElementById('nb-'+name);
+  if(nb) nb.classList.add('on');
+  if(name!=='detail') S.tab=name;
+  if(name==='wallet') loadSignals();
+  if(name==='trade')  updCalc();
+  if(name==='agent')  refreshStats();
+  document.getElementById('content').scrollTo(0,0);
+}
+
+// ══ TOAST ══
+function toast(msg,err=false){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.style.borderColor=err?'rgba(255,107,107,.3)':'var(--b2)';
+  t.classList.add('in');
+  setTimeout(()=>t.classList.remove('in'),2800);
+}
+
+// ══ API ══
+async function api(url,method='GET',body=null){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(body) opt.body=JSON.stringify(body);
+  try{
+    const r=await fetch(API+url,opt);
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'Error');}
+    return r.json();
+  }catch(e){throw e;}
+}
+
+// ══ SIGNALS ══
+async function loadSignals(){
+  try{
+    const r=await api('/api/signals');
+    S.signals=r.signals||{};
+    for(const[sym,sig] of Object.entries(S.signals))
+      if(sig.raw?.price) S.prices[sym]=sig.raw.price;
+    renderSigGrid();
+    loadMktData(S.activeSym);
+    loadKlines(S.activeSym,S.tf);
+  }catch(e){console.warn('signals:',e);}
+}
+
+function renderSigGrid(){
+  const grid=document.getElementById('sigGrid');
+  if(!Object.keys(S.signals).length){
+    grid.innerHTML='<div style="text-align:center;font-size:12px;color:var(--s3);padding:24px 0">Завантаження...</div>';
+    return;
+  }
+  const SYMS=['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','ADAUSDT','DOGEUSDT'];
+  grid.innerHTML='';
+  for(const sym of SYMS){
+    const sig=S.signals[sym]; if(!sig) continue;
+    const dec=sig.decision||'NO TRADE';
+    const cls=dec==='LONG'?'long':dec==='SHORT'?'short':'nt';
+    const bcls=dec==='LONG'?'bl':dec==='SHORT'?'bs':'bn';
+    const fillBg=dec==='LONG'?'var(--long)':dec==='SHORT'?'var(--short)':'var(--s3)';
+    const price=S.prices[sym]||sig.raw?.price||0;
+    const chg=sig.raw?.change||0;
+    const d=document.createElement('div');
+    d.className='sig '+cls;
+    d.onclick=()=>openDetail(sym);
+    d.innerHTML=`
+      <div>
+        <div class="sig-sym">${sym.replace('USDT','/USDT')}</div>
+        <div class="sig-price">$${fp(price)}&nbsp;<span style="color:${chg>=0?'var(--long)':'var(--short)'};font-size:10px">${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%</span></div>
+      </div>
+      <div style="text-align:right">
+        <span class="badge ${bcls}">${dec==='NO TRADE'?'WAIT':dec}</span>
+        <div style="font-size:10px;color:var(--s2);font-family:var(--mono);margin-bottom:2px">${sig.confidence}% конф.</div>
+        <div class="conf-bar"><div class="cf" style="width:${sig.confidence}%;background:${fillBg};box-shadow:0 0 5px ${fillBg}88"></div></div>
+      </div>`;
+    grid.appendChild(d);
+  }
+}
+
+// ══ DETAIL ══
+function openDetail(sym){
+  const sig=S.signals[sym]; if(!sig) return;
+  S.activeSym=sym;
+  setText('detSym',sym.replace('USDT','/USDT'));
+  setText('detStrat',sig.strategy||'STANDARD');
+  const dec=sig.decision||'NO TRADE';
+  const badge=document.getElementById('detBadge');
+  badge.textContent=dec==='NO TRADE'?'WAIT':dec;
+  badge.className='badge '+(dec==='LONG'?'bl':dec==='SHORT'?'bs':'bn');
+  document.getElementById('detAmd').style.display=sig.strategy==='AMD_FVG'?'inline-flex':'none';
+  setText('detConf',sig.confidence||0);
+  setText('detEntry','$'+fp(sig.entry||0));
+  setText('detTp','$'+fp(sig.tp||0));
+  setText('detSl','$'+fp(sig.sl||0));
+  setText('detRr','1:'+(sig.rr||0).toFixed(1));
+  setText('detLev',(sig.lev||1)+'x');
+  const raw=sig.raw||{};
+  const gauges=[
+    {l:'OI Δ15m',v:raw.oi||0,max:10,u:'%'},
+    {l:'Funding',v:(raw.funding||0)*100,max:.05,u:'%'},
+    {l:'Liq Ratio',v:raw.liq||1,max:5,u:'x'},
+    {l:'OB Imbal.',v:raw.ob||0,max:.4,u:''},
+    {l:'Score',v:sig.score||0,max:7,u:''},
+  ];
+  document.getElementById('gaugeRows').innerHTML=gauges.map(g=>{
+    const pct=Math.min(100,Math.abs(g.v)/g.max*100);
+    const c=g.v>0?'var(--long)':g.v<0?'var(--short)':'var(--s3)';
+    return `<div class="gauge-row">
+      <div class="gauge-lbl">${g.l}</div>
+      <div class="gauge-track"><div class="gauge-fill" style="width:${pct}%;background:${c};box-shadow:0 0 6px ${c}66"></div></div>
+      <div class="gauge-val" style="color:${c}">${g.v.toFixed(g.u==='%'?4:2)}${g.u}</div>
+    </div>`;
+  }).join('');
+  const rEl=document.getElementById('detReasons');
+  rEl.innerHTML='<div class="inner"><div class="slbl">Причини сигналу</div>'
+    +(sig.reasons||[]).map(r=>{
+      const pos=r.includes('↑')||r.includes('бичач')||r.includes('LONG');
+      const neg=r.includes('↓')||r.includes('ведмеж')||r.includes('SHORT')||r.includes('перекуп');
+      const c=pos?'var(--long)':neg?'var(--short)':'var(--s3)';
+      return `<div class="reason-item"><div class="rdot" style="background:${c};box-shadow:0 0 5px ${c}88"></div><span>${r}</span></div>`;
+    }).join('')+'</div>';
+  renderMktTiles('detMkt',raw);
+  goTab('detail');
+}
+
+// ══ MARKET DATA ══
+async function loadMktData(sym){
+  try{
+    const d=await api('/api/market/'+sym);
+    setText('mktSym',sym.replace('USDT','/USDT'));
+    renderMktTiles('mktGrid',{
+      oi:d.oi?.delta_15m||0,funding:d.funding?.rate||0,
+      liq:d.liquidations?.ratio||1,ob:d.orderbook?.imbalance||0,
+    });
+  }catch(e){}
+}
+
+function renderMktTiles(gridId,raw){
+  const oi=raw.oi||0,fr=(raw.funding||0)*100,lq=raw.liq||1,ob=raw.ob||0;
+  const tiles=[
+    {n:'Open Interest',v:(oi>=0?'+':'')+oi.toFixed(2)+'%',s:oi>2?'↑ Сильне зростання':oi<-2?'↓ Спад OI':'Нейтрально',c:oi>2?'var(--long)':oi<-2?'var(--short)':'var(--s3)',p:Math.min(100,Math.abs(oi)/10*100)},
+    {n:'Funding Rate',v:fr.toFixed(4)+'%',s:fr>0.01?'⚠ Перекупленість':fr<-0.01?'⚠ Перепроданість':'Нейтральний',c:fr>0.01?'var(--short)':fr<-0.01?'var(--long)':'var(--s3)',p:Math.min(100,Math.abs(fr)/.05*100)},
+    {n:'Liquidations',v:'x'+lq.toFixed(2),s:lq>2?'Long ліквіди':lq<0.5?'Short ліквіди':'Баланс',c:lq>2?'var(--long)':lq<0.5?'var(--short)':'var(--s3)',p:Math.min(100,lq/5*100)},
+    {n:'OB Imbalance',v:(ob>=0?'+':'')+ob.toFixed(3),s:ob>0.15?'Тиск покупців':ob<-0.15?'Тиск продавців':'Збалансовано',c:ob>0.15?'var(--long)':ob<-0.15?'var(--short)':'var(--s3)',p:Math.min(100,Math.abs(ob)/.4*100)},
+  ];
+  document.getElementById(gridId).innerHTML=tiles.map(t=>`
+    <div class="mkt-t noise">
+      <div style="position:relative;z-index:1">
+        <div class="mt-n">${t.n}</div>
+        <div class="mt-v" style="color:${t.c};text-shadow:0 0 10px ${t.c}44">${t.v}</div>
+        <div class="mt-s">${t.s}</div>
+        <div class="mt-bar"><div class="mt-fill" style="width:${t.p}%;background:${t.c};box-shadow:0 0 6px ${t.c}66"></div></div>
+      </div>
+    </div>`).join('');
+}
+
+// ══ CHART ══
+async function loadKlines(sym,tf){
+  try{
+    const d=await api(`/api/klines/${sym}?interval=${tf}&limit=80`);
+    S.candles=d.candles||[];
+    setText('chartSym',sym.replace('USDT','/USDT'));
+    drawChart();
+  }catch(e){drawChart();}
+}
+
+function drawChart(){
+  const cv=document.getElementById('mainChart'); if(!cv) return;
+  const W=cv.offsetWidth,H=132,dpr=window.devicePixelRatio||1;
+  cv.width=W*dpr;cv.height=H*dpr;cv.style.height=H+'px';
+  const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);
+  const data=S.candles.slice(-65);
+  if(!data.length){ctx.clearRect(0,0,W,H);return;}
+  const mn=Math.min(...data.map(c=>c.l))*.999,mx=Math.max(...data.map(c=>c.h))*1.001;
+  const rng=mx-mn||1,step=W/data.length;
+  const y=v=>H-((v-mn)/rng)*H*.82-H*.09;
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='rgba(255,255,255,.03)';ctx.lineWidth=1;
+  for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,i/4*H);ctx.lineTo(W,i/4*H);ctx.stroke();}
+  data.forEach((c,i)=>{
+    const x=i*step+step*.15,cw=step*.7,bull=c.c>=c.o;
+    const col=bull?'rgba(61,220,132,.85)':'rgba(255,107,107,.8)';
+    ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=.7;
+    ctx.beginPath();ctx.moveTo(x+cw/2,y(c.h));ctx.lineTo(x+cw/2,y(c.l));ctx.stroke();
+    ctx.fillRect(x,y(Math.max(c.o,c.c)),cw,Math.max(1.2,y(Math.min(c.o,c.c))-y(Math.max(c.o,c.c))));
+  });
+  const mv=Math.max(...data.map(c=>c.v));
+  data.forEach((c,i)=>{
+    ctx.fillStyle=c.c>=c.o?'rgba(61,220,132,.12)':'rgba(255,107,107,.1)';
+    ctx.fillRect(i*step+step*.15,H-c.v/mv*18,step*.7,c.v/mv*18);
+  });
+}
+function setTf(tf,el){
+  S.tf=tf;
+  document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('on'));
+  el.classList.add('on');
+  loadKlines(S.activeSym,tf);
+}
+
+// ══ AGENT ══
+const logC={buy:'var(--long)',sell:'var(--short)',warn:'var(--warn)',info:'var(--blue)'};
+function addLog(type,msg){
+  const box=document.getElementById('agentLog');
+  const t=new Date().toLocaleTimeString('uk',{hour12:false});
+  const d=document.createElement('div');
+  d.innerHTML=`<span style="color:var(--s3)">[${t}]</span> <span style="color:${logC[type]||logC.info}">${msg}</span>`;
+  box.appendChild(d);
+  box.scrollTop=box.scrollHeight;
+}
+
+async function startAgent(){
+  const risk=parseFloat(document.getElementById('riskPct').value)||1.5;
+  const conf=parseInt(document.getElementById('confRng').value)||70;
+  const maxO=parseInt(document.getElementById('maxOpen').value)||3;
+  try{
+    const r=await api('/api/agent','POST',{user_id:UID,action:'start',risk_pct:risk,min_conf:conf,max_open:maxO});
+    if(r.success){
+      S.agentOn=true;updAgentUI();
+      addLog('info','▶ AXIFLOW Agent запущено');
+      addLog('info',`Ризик: ${risk}% | Конф.: ≥${conf}% | Макс. угод: ${maxO}`);
+      toast('✅ Агент запущено!');
+      tg?.sendData(JSON.stringify({type:'agent_started'}));
+    }
+  }catch(e){addLog('warn','Помилка: '+e.message);toast('❌ '+e.message,true);}
+}
+
+async function stopAgent(){
+  try{
+    await api('/api/agent','POST',{user_id:UID,action:'stop'});
+    S.agentOn=false;updAgentUI();
+    addLog('warn','■ Агент зупинено');
+    toast('Агент зупинено');
+  }catch(e){toast('❌ '+e.message,true);}
+}
+
+async function doScan(){
+  const btn=document.getElementById('scanBtn');
+  btn.disabled=true;btn.textContent='⟳ Сканую...';
+  addLog('info','🔍 Сканую ринок...');
+  try{
+    const r=await api('/api/signals');
+    S.signals=r.signals||{};
+    let found=0;
+    for(const[sym,sig] of Object.entries(S.signals)){
+      if(sig.decision!=='NO TRADE'){
+        found++;
+        const t=sig.decision==='LONG'?'buy':'sell';
+        addLog(t,`${sym}: ${sig.decision} conf=${sig.confidence}% score=${sig.score}`);
+        addLog('info',`  TP $${fp(sig.tp)} · SL $${fp(sig.sl)} · lev ${sig.lev}x · RR 1:${sig.rr?.toFixed(1)}`);
+      }
+    }
+    if(!found) addLog('warn','Немає сигналів — ринок нейтральний');
+    else addLog('info',`✓ Знайдено ${found} сигналів`);
+    renderSigGrid();
+  }catch(e){addLog('warn','Помилка: '+e.message);}
+  btn.disabled=false;btn.textContent='⟳ Сканувати зараз';
+}
+
+async function refreshStats(){
+  try{
+    const r=await api('/api/agent','POST',{user_id:UID,action:'status'});
+    setText('stOpen',r.open_count||0);
+    setText('stWr',(r.win_rate||0)+'%');
+    const pnl=r.total_pnl||0;
+    const pEl=document.getElementById('stPnl');
+    pEl.textContent=(pnl>=0?'$+':'$-')+Math.abs(pnl).toFixed(0);
+    pEl.style.color=pnl>=0?'var(--long)':'var(--short)';
+    if(r.running!==undefined){S.agentOn=r.running;updAgentUI();}
+    // Open trades
+    const list=r.open_trades||[];
+    const el=document.getElementById('openTrades');
+    if(!list.length){
+      el.innerHTML='<div style="text-align:center;font-size:12px;color:var(--s3);padding:18px 0">Немає відкритих угод</div>';
+    }else{
+      el.innerHTML=list.map(t=>`
+        <div class="trade-c">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="font-weight:600">${t.symbol.replace('USDT','/USDT')}</span>
+            <span class="badge ${t.side==='BUY'?'bl':'bs'}">${t.side==='BUY'?'LONG':'SHORT'}</span>
+          </div>
+          <div style="font-size:11px;font-family:var(--mono);color:var(--s3);margin-bottom:3px">
+            Entry $${fp(t.entry)} · TP $${fp(t.tp)} · SL $${fp(t.sl)} · ${t.lev}x
+          </div>
+          <div style="font-size:12px;font-family:var(--mono);font-weight:600;color:${t.pnl>=0?'var(--long)':'var(--short)'}">
+            PnL: ${t.pnl>=0?'+':''}${t.pnl?.toFixed(2)}$ · $${t.amount?.toFixed(0)}
+          </div>
+        </div>`).join('');
+    }
+  }catch(e){}
+}
+
+function updAgentUI(){
+  const dot=document.getElementById('agentDot');
+  const lbl=document.getElementById('pillLbl');
+  const badge=document.getElementById('agentBadge');
+  const start=document.getElementById('agentStartBtn');
+  const stop=document.getElementById('agentStopBtn');
+  if(S.agentOn){
+    dot.className='dot on';lbl.textContent='ACTIVE';
+    badge.textContent='ACTIVE';badge.style.color='var(--long)';
+    start.style.display='none';stop.style.display='block';
+  }else{
+    dot.className='dot';lbl.textContent='AGENT';
+    badge.textContent='OFFLINE';badge.style.color='var(--s3)';
+    start.style.display='block';stop.style.display='none';
+  }
+}
+
+function updConf(el){
+  document.getElementById('confV').textContent=el.value+'%';
+  const pct=(el.value-55)/35*100;
+  el.style.background=`linear-gradient(to right,var(--blue) 0%,var(--blue) ${pct}%,rgba(255,255,255,.1) ${pct}%)`;
+}
+
+// ══ TRADE ══
+function setSide(side){
+  S.tradeSide=side;
+  document.getElementById('tabBuy').className='stab buy'+(side==='buy'?' on':'');
+  document.getElementById('tabSell').className='stab sell'+(side==='sell'?' on':'');
+  updCalc();
+}
+
+function updAmt(el){
+  const v=el.value;
+  document.getElementById('tradeAmtLbl').textContent='$'+v;
+  const pct=(v-10)/4990*100;
+  el.style.background=`linear-gradient(to right,var(--blue) 0%,var(--blue) ${pct}%,rgba(255,255,255,.1) ${pct}%)`;
+  updCalc();
+}
+
+function updCalc(){
+  const sym=document.getElementById('tradeSym')?.value||'BTCUSDT';
+  const amt=parseFloat(document.getElementById('tradeAmt')?.value||100);
+  const lev=parseInt(document.getElementById('tradeLev')?.value||1);
+  const price=S.prices[sym]||0;
+  const qty=price>0?amt/price:0;
+  const pos=amt*lev;
+  setText('osPrice',price>0?'$'+fp(price):'Завантаження...');
+  setText('osQty',qty.toFixed(6));
+  setText('osPos','$'+pos.toFixed(0));
+  setText('osFee','$'+(pos*.0004).toFixed(3));
+  const sig=S.signals[sym];
+  const sigBox=document.getElementById('tradeSignalBox');
+  if(sig&&sig.decision!=='NO TRADE'){
+    sigBox.style.display='block';
+    const sigEl=document.getElementById('tsSig');
+    sigEl.textContent=sig.decision+' '+sig.confidence+'%';
+    sigEl.style.color=sig.decision==='LONG'?'var(--long)':'var(--short)';
+    setText('tsTp','$'+fp(sig.tp||0));
+    setText('tsSl','$'+fp(sig.sl||0));
+    setText('tsLev',(sig.lev||1)+'x');
+    setText('tsRr','1:'+(sig.rr||0).toFixed(1));
+  }else{sigBox.style.display='none';}
+  const btn=document.getElementById('execBtn');
+  if(btn){
+    btn.className='btn '+(S.tradeSide==='buy'?'btn-long':'btn-short');
+    btn.textContent=S.tradeSide==='buy'
+      ?`▲ Long ${sym.replace('USDT','')} · $${amt}`
+      :`▼ Short ${sym.replace('USDT','')} · $${amt}`;
+  }
+}
+
+async function execTrade(){
+  const sym=document.getElementById('tradeSym').value;
+  const amt=parseFloat(document.getElementById('tradeAmt').value);
+  const lev=parseInt(document.getElementById('tradeLev').value);
+  const btn=document.getElementById('execBtn');
+  btn.disabled=true;
+  try{
+    const r=await api('/api/trade','POST',{
+      user_id:UID,symbol:sym,side:S.tradeSide==='buy'?'BUY':'SELL',
+      amount:amt,leverage:lev,
+    });
+    toast(`✅ ${S.tradeSide==='buy'?'Long':'Short'} ${sym}${r.trade?.demo?' (demo)':''}`);
+    addLog(S.tradeSide==='buy'?'buy':'sell',
+      `${S.tradeSide==='buy'?'LONG':'SHORT'} ${sym} $${amt} lev=${lev}x`);
+    tg?.sendData(JSON.stringify({type:'trade',sym,side:S.tradeSide,amt}));
+  }catch(e){toast('❌ '+e.message,true);}
+  btn.disabled=false;
+}
+
+// ══ SETTINGS ══
+document.getElementById('connMode').addEventListener('change',function(){
+  const v=this.value;
+  document.getElementById('bybitFields').style.display=(v==='bybit'||v==='both')?'block':'none';
+  document.getElementById('binanceFields').style.display=(v==='binance'||v==='both')?'block':'none';
+});
+
+async function connectWallet(){
+  const mode=document.getElementById('connMode').value;
+  const testnet=document.getElementById('netMode').value==='true';
+  const bal=parseFloat(document.getElementById('initBal').value)||10000;
+  try{
+    const r=await api('/api/wallet','POST',{
+      user_id:UID,exchange:mode,
+      bybit_key:document.getElementById('bybitKey').value||'',
+      bybit_secret:document.getElementById('bybitSec').value||'',
+      binance_key:document.getElementById('binanceKey').value||'',
+      binance_secret:document.getElementById('binanceSec').value||'',
+      testnet,balance:bal,
+    });
+    S.balance=r.balance||bal;S.connected=true;
+    setText('balAmt','$'+S.balance.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2}));
+    setText('balSub',(r.demo?'🧪 Demo Mode':'💼 '+(mode.toUpperCase()))+' · Connected');
+    document.getElementById('balSub').style.color=r.demo?'var(--s2)':'var(--long)';
+    const ok=document.getElementById('connOk');
+    ok.style.display='block';
+    ok.textContent=`✦ Підключено${r.demo?' (demo)':''} · $${S.balance.toLocaleString()}`;
+    toast('✅ Гаманець підключено!');
+    goTab('wallet');
+  }catch(e){toast('❌ '+e.message,true);}
+}
+
+// ══ UTILS ══
+function fp(p){
+  if(!p&&p!==0) return '0.00';
+  if(p>=10000) return p.toLocaleString('en',{minimumFractionDigits:1,maximumFractionDigits:1});
+  if(p>=100)  return p.toFixed(2);
+  if(p>=1)    return p.toFixed(3);
+  return p.toFixed(5);
+}
+function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
+
+// ══ INIT ══
+window.addEventListener('load',()=>{
+  goTab('wallet');
+  setInterval(()=>{if(S.tab==='wallet')loadSignals();},60000);
+  setInterval(()=>{if(S.tab==='agent')refreshStats();},10000);
+  // Try load existing wallet
+  api('/api/wallet/'+UID).then(w=>{
+    if(w?.connected){
+      S.balance=w.balance||0;
+      setText('balAmt','$'+S.balance.toLocaleString('en',{minimumFractionDigits:2}));
+      setText('balSub',(w.demo?'🧪 Demo':'💼 '+w.exchange?.toUpperCase())+' · Connected');
+      document.getElementById('balSub').style.color=w.demo?'var(--s2)':'var(--long)';
+      S.connected=true;
+    }
+  }).catch(()=>{});
+  window.addEventListener('resize',drawChart);
+});
+</script>
+</body>
+</html>
 
