@@ -702,6 +702,6 @@ def _mock_candles(n=80):
     return out
 
 
-if __name__ == "__main__":
+if name == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=False)
