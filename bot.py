@@ -3,7 +3,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(message)s")
-log = logging.getLogger("axiflow.bot")
 
 try:
     from dotenv import load_dotenv
@@ -17,19 +16,20 @@ APP_URL = os.environ.get("MINI_APP_URL", "")
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("⚡ Відкрити AXIFLOW", web_app=WebAppInfo(url=APP_URL))],
-        [InlineKeyboardButton("📊 Що таке AXIFLOW?", callback_data="about"),
-         InlineKeyboardButton("❓ Як налаштувати?", callback_data="help")],
+        [InlineKeyboardButton("⚡ Open AXIFLOW TRADE", web_app=WebAppInfo(url=APP_URL))],
+        [InlineKeyboardButton("📊 About", callback_data="about"),
+         InlineKeyboardButton("🔑 API Setup", callback_data="api")],
     ]
     await update.message.reply_text(
-        "⚡ *AXIFLOW — Smart Money Trading*\n\n"
-        "Система аналізу крипто ринку:\n\n"
-        "◆ Аналізує 15+ пар безперервно\n"
-        "◆ OI · Funding · Ліквідації · AMD/FVG\n"
-        "◆ RR = 1:4 на кожну угоду\n"
-        "◆ Bybit + Binance\n"
-        "◆ Авто-торгівля + сповіщення сюди\n\n"
-        "Натисни щоб відкрити 👇",
+        "⚡ *AXIFLOW TRADE*\n\n"
+        "Professional Smart Money Trading System:\n\n"
+        "◆ Scans 20+ pairs continuously\n"
+        "◆ OI · Funding · Liquidations · AMD/FVG\n"
+        "◆ Dynamic RR — minimum 1:3\n"
+        "◆ Targets moves of 2.5%+\n"
+        "◆ Bybit · Binance · MEXC\n"
+        "◆ Auto-trading + Telegram alerts\n\n"
+        "Tap to open 👇",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -41,37 +41,33 @@ async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "about":
         await q.edit_message_text(
-            "📊 *Що таке AXIFLOW?*\n\n"
-            "AXIFLOW — це AI торговий агент який:\n\n"
-            "1️⃣ Сканує ринок кожні 30 секунд\n"
-            "2️⃣ Аналізує Open Interest (OI)\n"
-            "3️⃣ Перевіряє Funding Rate\n"
-            "4️⃣ Відстежує ліквідації\n"
-            "5️⃣ Виявляє AMD/FVG патерни\n"
-            "6️⃣ При сигналі — відкриває угоду\n"
-            "7️⃣ Ставить TP та SL автоматично\n"
-            "8️⃣ Надсилає сповіщення сюди\n\n"
-            "💡 RR = 1:4 означає:\n"
-            "ризикуєш $1 щоб заробити $4",
+            "📊 *How AXIFLOW works:*\n\n"
+            "1️⃣ Scans 20+ futures pairs every 30s\n"
+            "2️⃣ Analyzes: RSI, EMA, OI, Funding, CVD,\n"
+            "   Liquidations, OrderBook, AMD/FVG\n"
+            "3️⃣ Filters: only RR ≥ 1:3, move ≥ 2.5%\n"
+            "4️⃣ Opens position automatically\n"
+            "5️⃣ Sets TP and SL\n"
+            "6️⃣ Sends Telegram alert\n\n"
+            "💡 *RR = 1:3* means:\n"
+            "Risk $1 to potentially earn $3+",
             parse_mode="Markdown"
         )
 
-    elif q.data == "help":
+    elif q.data == "api":
         await q.edit_message_text(
-            "❓ *Як налаштувати:*\n\n"
-            "1️⃣ Відкрий Mini App\n"
-            "2️⃣ Натисни *API* внизу\n"
-            "3️⃣ Для демо — просто натисни *Підключити*\n"
-            "4️⃣ Для реальної торгівлі — вкажи ключі\n"
-            "5️⃣ Натисни *Агент* → Запустити\n\n"
-            "🔑 *Bybit API ключі:*\n"
-            "bybit.com → Профіль → API Management\n"
-            "Create New Key\n"
+            "🔑 *API Setup Guide:*\n\n"
+            "*Bybit:*\n"
+            "bybit.com → Profile → API Management\n"
+            "Create New Key → System-generated\n"
             "✅ Read  ✅ Trade  ❌ Withdraw\n\n"
-            "🔑 *Binance API ключі:*\n"
-            "binance.com → Профіль → API Management\n"
+            "*Binance:*\n"
+            "binance.com → Profile → API Management\n"
             "✅ Enable Futures  ❌ Enable Withdrawals\n\n"
-            "⚠️ Починай завжди з Testnet!",
+            "*MEXC:*\n"
+            "mexc.com → Profile → API Management\n"
+            "✅ Trade  ❌ Withdraw\n\n"
+            "⚠️ Never enable Withdraw permissions!",
             parse_mode="Markdown"
         )
 
@@ -85,19 +81,18 @@ async def post_init(application):
                     web_app=WebAppInfo(url=APP_URL)
                 )
             )
-            log.info(f"✅ Menu button встановлено: {APP_URL}")
         except Exception as e:
-            log.error(f"Menu button: {e}")
+            print(f"Menu button: {e}")
 
 
 def main():
     if not TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN не вказано!")
+        print("ERROR: TELEGRAM_BOT_TOKEN not set")
         return
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(cb))
-    log.info("✅ AXIFLOW Bot запущено")
+    print("✅ AXIFLOW Bot running...")
     app.run_polling()
 
 
