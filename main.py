@@ -651,26 +651,21 @@ class Agent:
 agent=Agent()
 
 
-async def scan_loop():
-    log.info("AXIFLOW v4 scanner started")
+async def server_startup():
+    """Server startup - notify and keep alive. Signals come from bot.py via channel."""
     await asyncio.sleep(5)
-    await notify("AXIFLOW v4 started\nScanner active - 20 pairs\nSignals fire at confidence >= 65%\nCooldown: 15 min per symbol")
-    scan_count=0
-    while True:
-        try:
-            for sym in SYMBOLS:
-                await analyze_symbol(sym); await asyncio.sleep(2)
-            scan_count+=1
-            if scan_count%720==0:
-                active=sum(1 for s in cache.values() if s.get("decision")!="NO TRADE")
-                await notify(f"AXIFLOW heartbeat\nScans: {scan_count}\nActive signals: {active}")
-        except Exception as e: log.error("Scan: %s",e)
-        await asyncio.sleep(20)
+    await notify(
+        "AXIFLOW v4 server started\n"
+        "API ready for Mini App\n"
+        "Signals: bot reads @OpenInterestTracker\n"
+        "Connect exchange in Mini App API tab"
+    )
 
 
 @asynccontextmanager
 async def lifespan(app):
-    asyncio.create_task(scan_loop()); yield
+    asyncio.create_task(server_startup())
+    yield
 
 
 app=FastAPI(title="AXIFLOW v4",lifespan=lifespan)
