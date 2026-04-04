@@ -33,7 +33,7 @@ SYMBOLS = [
 ]
 
 SIGNAL_COOLDOWN = 900
-MIN_CONFIDENCE  = 65
+MIN_CONFIDENCE  = 70
 
 _last_signal: dict = {}
 cache:         dict = {}
@@ -719,10 +719,8 @@ async def analyze_symbol(sym: str):
         log.info("[%s] %s conf=%d%% RR=%.1f move=%.1f%% %s",
                  sym, direction, confidence, rr, move_pct, strategy)
 
-        # Send signal if: direction changed OR cooldown passed
-        if cooldown_ok or prev_decision != direction:
-            if cooldown_ok:
-                _last_signal[sym] = time.time()
+        if (prev_decision != direction or cooldown_ok) and cooldown_ok:
+            _last_signal[sym] = time.time()
             await _tg_signal(sig)
 
         return cache[sym]
@@ -788,48 +786,28 @@ class ExchangeClient:
     def _connect(self):
         try:
             import ccxt
-
-            # MEXC Futures needs special config  -  uses swap/contract market
-            if self.exchange == "mexc":
-                cfg = {
-                    "apiKey":          self.api_key,
-                    "secret":          self.api_secret,
-                    "enableRateLimit": True,
-                    "options":         {"defaultType": "swap"},
-                }
-                self._ex = ccxt.mexc(cfg)
-
-            elif self.exchange == "bybit":
-                cfg = {
-                    "apiKey":          self.api_key,
-                    "secret":          self.api_secret,
-                    "enableRateLimit": True,
-                    "options":         {"defaultType": "future"},
-                }
-                self._ex = ccxt.bybit(cfg)
-
-            elif self.exchange == "binance":
-                cfg = {
-                    "apiKey":          self.api_key,
-                    "secret":          self.api_secret,
-                    "enableRateLimit": True,
-                    "options":         {"defaultType": "future"},
-                }
-                self._ex = ccxt.binanceusdm(cfg)
-
-            else:
-                self.error = f"Unsupported exchange: {self.exchange}"
+            cfg = {
+                "apiKey":          self.api_key,
+                "secret":          self.api_secret,
+                "enableRateLimit": True,
+                "options":         {"defaultType": "future"},
+            }
+            ex_map = {
+                "bybit":   ccxt.bybit,
+                "binance": ccxt.binanceusdm,
+                "mexc":    ccxt.mexc,
+            }
+            if self.exchange not in ex_map:
+                self.error = f"Unsupported: {self.exchange}"
                 return
-
+            self._ex = ex_map[self.exchange](cfg)
             if self.testnet:
                 try:
                     self._ex.set_sandbox_mode(True)
                 except Exception:
                     pass
-
             self.connected = True
             log.info("%s connected testnet=%s", self.exchange.upper(), self.testnet)
-
         except Exception as e:
             self.error = str(e)
             log.error("Exchange %s: %s", self.exchange, e)
@@ -838,50 +816,17 @@ class ExchangeClient:
         if not self._ex:
             return False, self.error
         try:
-            # Different fetch method per exchange to avoid unsupported method errors
-            if self.exchange == "mexc":
-                # MEXC futures balance uses different params
-                bal = await asyncio.to_thread(
-                    self._ex.fetch_balance, {"type": "swap"}
-                )
-            else:
-                bal = await asyncio.to_thread(self._ex.fetch_balance)
-
-            # Try multiple keys for balance
-            usdt = 0.0
-            for key in ["USDT", "usdt"]:
-                if key in bal and bal[key].get("free") is not None:
-                    usdt = float(bal[key]["free"])
-                    break
-            # Also check 'total' key structure
-            if usdt == 0.0 and "total" in bal:
-                usdt = float(bal["total"].get("USDT", 0))
-
-            return True, usdt
+            bal = await asyncio.to_thread(self._ex.fetch_balance)
+            return True, float(bal.get("USDT", {}).get("free", 0))
         except Exception as e:
-            err = str(e)
-            log.warning("test_connection %s: %s", self.exchange, err)
-            return False, err
+            return False, str(e)
 
     async def get_balance(self) -> float:
         if not self._ex:
             return 0.0
         try:
-            if self.exchange == "mexc":
-                bal = await asyncio.to_thread(
-                    self._ex.fetch_balance, {"type": "swap"}
-                )
-            else:
-                bal = await asyncio.to_thread(self._ex.fetch_balance)
-
-            usdt = 0.0
-            for key in ["USDT", "usdt"]:
-                if key in bal and bal[key].get("free") is not None:
-                    usdt = float(bal[key]["free"])
-                    break
-            if usdt == 0.0 and "total" in bal:
-                usdt = float(bal["total"].get("USDT", 0))
-            return usdt
+            bal = await asyncio.to_thread(self._ex.fetch_balance)
+            return float(bal.get("USDT", {}).get("free", 0))
         except Exception:
             return 0.0
 
@@ -1105,32 +1050,18 @@ agent = Agent()
 
 async def scan_loop():
     log.info("AXIFLOW v4 Smart Money scanner started")
-    await asyncio.sleep(5)
-    await notify(
-        "AXIFLOW v4 started\n"
-        "Scanner active - 20 pairs\n"
-        "Signals fire when confidence >= 70%\n"
-        "Cooldown: 15 min per symbol"
-    )
-    scan_count = 0
     while True:
         try:
             for sym in SYMBOLS:
                 await analyze_symbol(sym)
                 await asyncio.sleep(2)
-            scan_count += 1
-            if scan_count % 720 == 0:
-                active = sum(1 for s in cache.values() if s.get("decision") != "NO TRADE")
-                await notify(
-                    f"AXIFLOW heartbeat\nScans: {scan_count}\nActive signals: {active}"
-                )
         except Exception as e:
             log.error("Scan loop: %s", e)
         await asyncio.sleep(20)
 
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     asyncio.create_task(scan_loop())
     yield
 
@@ -1199,7 +1130,7 @@ class AgentReq(BaseModel):
     user_id:  str
     action:   str
     risk_pct: float = 1.5
-    min_conf: int   = 65
+    min_conf: int   = 70
     max_open: int   = 3
 
 
