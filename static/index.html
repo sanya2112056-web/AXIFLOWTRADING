@@ -604,9 +604,14 @@ canvas { display:block; width:100% !important; }
         <span id="agStatusLbl" style="font-family:var(--f-mono);font-size:8px;background:rgba(255,255,255,.05);padding:2px 9px;border-radius:5px;color:var(--cr4);margin-left:auto;text-transform:uppercase;letter-spacing:1px">Offline</span>
       </div>
       <div style="font-size:12px;color:var(--cr4);line-height:1.8;margin-bottom:14px">Pure Smart Money scanner. Fires only at confidence 70%+. One signal per symbol per 15 min. API keys required to trade.</div>
+      <div class="fw">
+        <label class="flbl">Position size % of balance per trade</label>
+        <input class="fi" type="number" id="riskPct" value="10" min="1" max="100" step="1" placeholder="e.g. 20 = 20% of balance per trade"/>
+        <div style="font-family:var(--f-mono);font-size:9px;color:var(--cr4);margin-top:5px">Each trade will use this % of your balance. Example: 20% of $500 = $100 per trade.</div>
+      </div>
       <div class="f2">
-        <div><label class="flbl">Risk per trade %</label><input class="fi" type="number" id="riskPct" value="1.5" min="0.5" max="10" step="0.5"/></div>
         <div><label class="flbl">Max open trades</label><select class="fi" id="maxOpen"><option>1</option><option selected>3</option><option>5</option></select></div>
+        <div><label class="flbl">Min confidence %</label><input class="fi" type="number" id="minConfInput" value="65" min="50" max="90" step="5"/></div>
       </div>
       <label class="flbl">Min confidence: <span id="confV" style="color:var(--cr2);font-family:var(--f-mono)">70%</span></label>
       <input type="range" class="rng" id="confRng" min="60" max="90" value="70"
@@ -960,7 +965,7 @@ function addLog(type, msg) {
 
 async function startAgent() {
   var risk = parseFloat(document.getElementById('riskPct').value) || 1.5;
-  var conf = parseInt(document.getElementById('confRng').value) || 70;
+  var conf = parseInt(document.getElementById('minConfInput') ? document.getElementById('minConfInput').value : document.getElementById('confRng').value) || 65;
   var maxO = parseInt(document.getElementById('maxOpen').value) || 3;
   try {
     var r = await apicall('/api/agent', 'POST', {user_id:UID, action:'start', risk_pct:risk, min_conf:conf, max_open:maxO});
