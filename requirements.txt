@@ -6,4 +6,3 @@ telethon==1.34.0
 ccxt
 python-dotenv==1.0.1
 pydantic==2.7.4
-numpy==1.26.4
