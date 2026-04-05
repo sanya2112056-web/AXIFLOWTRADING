@@ -1,18 +1,16 @@
 """
-AXIFLOW TRADE - Bot v2
-- Reads @OpenInterestTracker in real time via Telethon
-- Extracts ticker from #SYMBOL in every message
-- Runs FULL Smart Money analysis per the trading prompt
-- ALWAYS sends a response (even if NO TRADE - explains why)
-- Auto-trades if agent is ON
-- Sends all agent actions to Telegram
-- Pure ASCII - no latin-1 errors
+AXIFLOW TRADE - Professional AI Trading Agent
+Reads @OpenInterestTracker channel
+Analyzes per Smart Money prompt
+Always returns decision (ENTER or NO TRADE)
+Executes via MEXC/Bybit/Binance futures
+Pure ASCII source - no latin-1 errors
 """
 import asyncio
 import os
+import re
 import time
 import logging
-import re
 import httpx
 
 try:
@@ -21,47 +19,56 @@ try:
 except Exception:
     pass
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("axiflow_bot")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("axiflow")
 
-# ?? Config ????????????????????????????????????????????????
-BOT_TOKEN       = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID         = os.environ.get("TELEGRAM_CHAT_ID", "")
-APP_URL         = os.environ.get("MINI_APP_URL", "")
-API_URL         = os.environ.get("API_URL", "http://localhost:3000")
-TG_API_ID       = int(os.environ.get("TG_API_ID", "0"))
-TG_API_HASH     = os.environ.get("TG_API_HASH", "")
-TG_PHONE        = os.environ.get("TG_PHONE", "")
-MONITOR_CHANNEL = "@OpenInterestTracker"
-ANALYZE_COOLDOWN = 600  # 10 min per symbol
+# ?? Config ????????????????????????????????????????????????????????????????????
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+APP_URL   = os.environ.get("MINI_APP_URL", "")
+API_URL   = os.environ.get("API_URL", "http://localhost:3000")
 
-_analyzed: dict = {}
-balance_pct_setting: float = 10.0
-agent_active: bool = False
+TG_API_ID   = int(os.environ.get("TG_API_ID", "0"))
+TG_API_HASH = os.environ.get("TG_API_HASH", "")
+TG_PHONE    = os.environ.get("TG_PHONE", "")
 
-# ?? Send TG message ???????????????????????????????????????
-async def send(text: str):
+CHANNEL = "@OpenInterestTracker"
+BFUT    = "https://fapi.binance.com"
+
+# Agent state
+_position_pct: float = 10.0   # % of balance per trade
+_agent_on:     bool  = False   # auto-trading on/off
+_cooldown:     dict  = {}      # sym -> last_signal_ts
+_positions:    dict  = {}      # sym -> position info
+COOLDOWN_SEC   = 600           # 10 min per symbol
+MAX_POSITIONS  = 2             # max simultaneous positions
+
+
+# ?? Telegram ??????????????????????????????????????????????????????????????????
+async def tg(text: str):
     if not BOT_TOKEN or not CHAT_ID:
         return
     safe = text.encode("ascii", errors="replace").decode("ascii")
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
+        async with httpx.AsyncClient(timeout=8) as c:
             await c.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                 json={
-                    "chat_id": CHAT_ID,
-                    "text": safe,
-                    "parse_mode": "Markdown",
+                    "chat_id":                  CHAT_ID,
+                    "text":                     safe,
+                    "parse_mode":               "Markdown",
                     "disable_web_page_preview": True,
                 },
             )
     except Exception as e:
-        log.warning("TG send: %s", e)
+        log.warning("TG error: %s", e)
 
-# ?? Binance Futures data ??????????????????????????????????
-BFUT = "https://fapi.binance.com"
 
-async def _get(url, params=None):
+# ?? HTTP ??????????????????????????????????????????????????????????????????????
+async def get(url: str, params: dict = None):
     try:
         async with httpx.AsyncClient(timeout=9) as c:
             r = await c.get(url, params=params)
@@ -71,16 +78,90 @@ async def _get(url, params=None):
         log.debug("GET %s: %s", url, e)
         return None
 
-async def check_symbol_exists(sym):
-    """Check if symbol exists on Binance Futures."""
-    d = await _get(f"{BFUT}/fapi/v1/exchangeInfo")
-    if not d:
-        return False
-    symbols = [s["symbol"] for s in d.get("symbols", [])]
-    return sym in symbols
 
-async def fetch_ticker(sym):
-    d = await _get(f"{BFUT}/fapi/v1/ticker/24hr", {"symbol": sym})
+# ?? PARSE CHANNEL MESSAGE ?????????????????????????????????????????????????????
+def parse_msg(text: str) -> dict | None:
+    """
+    Parse @OpenInterestTracker message.
+
+    Example format:
+    [pump] #APTUSDT open interest increased 8.32% in 15 mins!
+    OI 5m:  +44,200 USD (+1.2%)
+    OI 15m: +310,500 USD (+8.32%)
+    OI 1H:  +890,000 USD (+24.1%)
+    CP: 9.842
+    5m:  9.798 (-0.45%)
+    15m: 9.107 (-7.5%)
+    FR: 0.0262%
+    """
+    if not text or len(text) < 5:
+        return None
+
+    # Extract ticker
+    m = re.search(r"#([A-Z]{2,12}(?:USDT)?)", text.upper())
+    if not m:
+        return None
+    raw_ticker = m.group(1)
+    symbol = raw_ticker if raw_ticker.endswith("USDT") else raw_ticker + "USDT"
+
+    # Signal type
+    tl = text.lower()
+    if any(w in tl for w in ["increased", "increase", "pump", "spike up", "surge"]):
+        sig_type = "pump"
+    elif any(w in tl for w in ["decreased", "decrease", "dump", "drop", "crash", "fall"]):
+        sig_type = "dump"
+    else:
+        sig_type = "pump"  # default
+
+    # OI % from message (already parsed - use as extra context)
+    oi_15m = 0.0
+    m15 = re.search(r"OI\s*15m[:\s]+[^(]*\(([+-]?\d+\.?\d*)%\)", text, re.IGNORECASE)
+    if m15:
+        oi_15m = float(m15.group(1))
+
+    oi_1h = 0.0
+    m1h = re.search(r"OI\s*1H[:\s]+[^(]*\(([+-]?\d+\.?\d*)%\)", text, re.IGNORECASE)
+    if m1h:
+        oi_1h = float(m1h.group(1))
+
+    # Current price from message
+    msg_price = 0.0
+    mcp = re.search(r"CP[:\s]+([0-9.]+)", text, re.IGNORECASE)
+    if mcp:
+        msg_price = float(mcp.group(1))
+
+    # Funding rate from message
+    msg_fr = 0.0
+    mfr = re.search(r"FR[:\s]+([+-]?\d+\.?\d*)%", text, re.IGNORECASE)
+    if mfr:
+        msg_fr = float(mfr.group(1)) / 100
+
+    # Price change 15m
+    price_15m_pct = 0.0
+    mp15 = re.search(r"15m[:\s]+[0-9.]+\s*\(([+-]?\d+\.?\d*)%\)", text, re.IGNORECASE)
+    if mp15:
+        price_15m_pct = float(mp15.group(1))
+
+    return {
+        "symbol":        symbol,
+        "sig_type":      sig_type,
+        "msg_oi_15m":    oi_15m,
+        "msg_oi_1h":     oi_1h,
+        "msg_price":     msg_price,
+        "msg_fr":        msg_fr,
+        "price_15m_pct": price_15m_pct,
+        "raw":           text,
+    }
+
+
+# ?? MARKET DATA ???????????????????????????????????????????????????????????????
+async def symbol_exists(sym: str) -> bool:
+    d = await get(f"{BFUT}/fapi/v1/ticker/price", {"symbol": sym})
+    return bool(d and "price" in d)
+
+
+async def fetch_ticker(sym: str) -> dict | None:
+    d = await get(f"{BFUT}/fapi/v1/ticker/24hr", {"symbol": sym})
     if not d:
         return None
     return {
@@ -91,678 +172,766 @@ async def fetch_ticker(sym):
         "low":    float(d["lowPrice"]),
     }
 
-async def fetch_klines(sym, tf="5m", limit=100):
-    d = await _get(f"{BFUT}/fapi/v1/klines",
-                   {"symbol": sym, "interval": tf, "limit": limit})
+
+async def fetch_klines(sym: str, tf: str = "5m", n: int = 100) -> list:
+    d = await get(f"{BFUT}/fapi/v1/klines",
+                  {"symbol": sym, "interval": tf, "limit": n})
     if not d:
         return []
     return [{"o": float(x[1]), "h": float(x[2]), "l": float(x[3]),
-             "c": float(x[4]), "v": float(x[5])} for x in d]
+             "c": float(x[4]), "v": float(x[5]), "t": int(x[0])} for x in d]
 
-async def fetch_oi(sym):
-    now  = await _get(f"{BFUT}/fapi/v1/openInterest", {"symbol": sym})
-    hist = await _get(f"{BFUT}/futures/data/openInterestHist",
-                      {"symbol": sym, "period": "5m", "limit": 12})
+
+async def fetch_oi(sym: str) -> dict:
+    now  = await get(f"{BFUT}/fapi/v1/openInterest", {"symbol": sym})
+    hist = await get(f"{BFUT}/futures/data/openInterestHist",
+                     {"symbol": sym, "period": "5m", "limit": 12})
     if not now:
-        return {"delta_15m": 0, "delta_1h": 0, "current": 0, "trend": "flat"}
+        return {"d15": 0, "d1h": 0, "cur": 0}
     cur  = float(now["openInterest"])
     vals = [float(h["sumOpenInterest"]) for h in (hist or [])]
     p15  = vals[-3]  if len(vals) >= 3  else cur
     p1h  = vals[-12] if len(vals) >= 12 else cur
-    d15  = (cur - p15) / max(p15, 1) * 100
-    d1h  = (cur - p1h) / max(p1h, 1) * 100
     return {
-        "current":   cur,
-        "delta_15m": d15,
-        "delta_1h":  d1h,
-        "trend":     "rising" if d1h > 2 else "falling" if d1h < -2 else "flat",
+        "cur": cur,
+        "d15": (cur - p15) / max(p15, 1) * 100,
+        "d1h": (cur - p1h) / max(p1h, 1) * 100,
     }
 
-async def fetch_funding(sym):
-    d  = await _get(f"{BFUT}/fapi/v1/premiumIndex", {"symbol": sym})
+
+async def fetch_funding(sym: str) -> dict:
+    d  = await get(f"{BFUT}/fapi/v1/premiumIndex", {"symbol": sym})
     fr = float(d["lastFundingRate"]) if d else 0
     return {
-        "rate":          fr,
-        "extreme_long":  fr >  0.010,
-        "extreme_short": fr < -0.010,
+        "rate":     fr,
+        "ext_long": fr >  0.010,
+        "ext_short":fr < -0.010,
     }
 
-async def fetch_liqs(sym):
-    d = await _get(f"{BFUT}/fapi/v1/allForceOrders", {"symbol": sym, "limit": 500})
+
+async def fetch_liqs(sym: str) -> dict:
+    d = await get(f"{BFUT}/fapi/v1/allForceOrders", {"symbol": sym, "limit": 500})
     if not d:
-        return {"ratio": 1.0, "long_vol": 0, "short_vol": 0, "total": 0}
+        return {"ratio": 1.0, "long_usd": 0, "short_usd": 0, "total": 0}
     lv = sum(float(o["origQty"]) * float(o["price"])
              for o in d if o.get("side") == "SELL")
     sv = sum(float(o["origQty"]) * float(o["price"])
              for o in d if o.get("side") == "BUY")
-    r  = lv / max(sv, 1)
-    return {"ratio": r, "long_vol": lv, "short_vol": sv, "total": lv + sv}
+    return {
+        "ratio":     lv / max(sv, 1),
+        "long_usd":  lv,
+        "short_usd": sv,
+        "total":     lv + sv,
+    }
 
-async def fetch_ob(sym):
-    d = await _get(f"{BFUT}/fapi/v1/depth", {"symbol": sym, "limit": 100})
+
+async def fetch_ob(sym: str) -> dict:
+    d = await get(f"{BFUT}/fapi/v1/depth", {"symbol": sym, "limit": 100})
     if not d:
-        return {"imbalance": 0}
+        return {"imb": 0}
     bv = sum(float(b[1]) for b in d.get("bids", []))
     av = sum(float(a[1]) for a in d.get("asks", []))
-    total = bv + av
-    return {"bid": bv, "ask": av, "imbalance": (bv - av) / total if total else 0}
+    tot = bv + av
+    return {"imb": (bv - av) / tot if tot else 0, "bid": bv, "ask": av}
 
-async def fetch_ls(sym):
-    d = await _get(f"{BFUT}/futures/data/globalLongShortAccountRatio",
-                   {"symbol": sym, "period": "5m", "limit": 3})
+
+async def fetch_ls(sym: str) -> dict:
+    d = await get(f"{BFUT}/futures/data/globalLongShortAccountRatio",
+                  {"symbol": sym, "period": "5m", "limit": 3})
     if not d:
         return {"ratio": 1.0}
     return {"ratio": float(d[-1].get("longShortRatio", 1))}
 
-# ?? Smart Money detectors ?????????????????????????????????
 
-def compute_cvd(candles):
+# ?? SMART MONEY DETECTORS ?????????????????????????????????????????????????????
+def cvd(candles: list) -> dict:
     if len(candles) < 10:
-        return {"divergence": 0, "buying_pressure": 50, "trend": "flat"}
-    cvd_vals = []
-    cum = 0.0
+        return {"div": 0, "bp": 50, "absorb": False}
+    vals = []
+    cum  = 0.0
     for c in candles:
         cum += c["v"] if c["c"] >= c["o"] else -c["v"]
-        cvd_vals.append(cum)
-    p = min(10, len(candles) - 1)
+        vals.append(cum)
+    p = min(12, len(candles) - 1)
     pu = candles[-1]["c"] > candles[-p]["c"] * 1.001
     pd = candles[-1]["c"] < candles[-p]["c"] * 0.999
-    cu = cvd_vals[-1] > cvd_vals[-p]
-    cd = cvd_vals[-1] < cvd_vals[-p]
-    div = 0
-    if pu and cd: div = -1   # bearish divergence
-    if pd and cu: div = 1    # bullish divergence
-    bv = sum(c["v"] for c in candles[-10:] if c["c"] >= c["o"])
-    sv = sum(c["v"] for c in candles[-10:] if c["c"] <  c["o"])
-    bp = bv / (bv + sv) * 100 if (bv + sv) > 0 else 50
-    return {
-        "divergence":      div,
-        "buying_pressure": bp,
-        "trend":           "rising" if cu else "falling" if cd else "flat",
-    }
+    cu = vals[-1] > vals[-p]
+    cd = vals[-1] < vals[-p]
+    div_val = 0
+    if pu and cd: div_val = -1
+    if pd and cu: div_val = 1
+    bv  = sum(c["v"] for c in candles[-10:] if c["c"] >= c["o"])
+    sv  = sum(c["v"] for c in candles[-10:] if c["c"] <  c["o"])
+    bp  = bv / (bv + sv) * 100 if (bv + sv) > 0 else 50
+    lc  = candles[-1]
+    av  = sum(c["v"] for c in candles[-20:]) / max(len(candles[-20:]), 1)
+    ab_ = sum(abs(c["c"] - c["o"]) for c in candles[-20:]) / max(len(candles[-20:]), 1)
+    absorb = lc["v"] > av * 2.0 and abs(lc["c"] - lc["o"]) < ab_ * 0.4
+    return {"div": div_val, "bp": bp, "absorb": bool(absorb),
+            "up": bool(cu), "dn": bool(cd)}
 
-def find_liquidity(candles, price):
-    """Find equal highs/lows (stop clusters) as liquidity targets."""
-    hs  = [c["h"] for c in candles[-60:]]
-    ls  = [c["l"] for c in candles[-60:]]
-    tol = 0.002
+
+def eq_levels(candles: list, price: float) -> dict:
+    hs  = [c["h"] for c in candles[-80:]]
+    ls  = [c["l"] for c in candles[-80:]]
+    tol = 0.0018
     above = sorted(set(
-        round(h, 6) for i, h in enumerate(hs)
-        if h > price and sum(1 for hh in hs[i+1:] if abs(hh - h) / max(h, 1) < tol) >= 2
+        round(h, 8) for i, h in enumerate(hs)
+        if h > price * 1.001 and
+        sum(1 for hh in hs[i+1:] if abs(hh - h) / max(h, 1) < tol) >= 2
     ))
     below = sorted(set(
-        round(l, 6) for i, l in enumerate(ls)
-        if l < price and sum(1 for ll in ls[i+1:] if abs(ll - l) / max(l, 1) < tol) >= 2
+        round(l, 8) for i, l in enumerate(ls)
+        if l < price * 0.999 and
+        sum(1 for ll in ls[i+1:] if abs(ll - l) / max(l, 1) < tol) >= 2
     ), reverse=True)
     return {
-        "above":    above[:3],
-        "below":    below[:3],
-        "day_high": max(hs),
-        "day_low":  min(ls),
+        "above":  above[:4],
+        "below":  below[:4],
+        "hi24":   max(hs) if hs else price * 1.05,
+        "lo24":   min(ls) if ls else price * 0.95,
     }
 
-def find_fvg(candles, price):
-    """Fair Value Gaps - imbalance zones."""
-    bull_fvg = None
-    bear_fvg = None
-    data = candles[-40:]
+
+def fvg(candles: list, price: float) -> dict:
+    bull = []; bear = []
+    data = candles[-60:]
     for i in range(2, len(data)):
         c0 = data[i-2]; c2 = data[i]
-        if c2["l"] > c0["h"] and c0["h"] < price:
-            bull_fvg = {
-                "top": c2["l"], "bot": c0["h"],
-                "mid": (c2["l"] + c0["h"]) / 2,
-                "size": (c2["l"] - c0["h"]) / max(c0["h"], 1) * 100,
-            }
-        elif c2["h"] < c0["l"] and c0["l"] > price:
-            bear_fvg = {
-                "top": c0["l"], "bot": c2["h"],
-                "mid": (c0["l"] + c2["h"]) / 2,
-                "size": (c0["l"] - c2["h"]) / max(c0["l"], 1) * 100,
-            }
-    return {"bull": bull_fvg, "bear": bear_fvg}
-
-def find_ob(candles, price):
-    """Order Blocks - last candle before strong move."""
-    data = candles[-60:]
-    avg  = sum(abs(c["c"] - c["o"]) for c in data) / max(len(data), 1)
-    bull = None; bear = None
-    for i in range(1, len(data) - 1):
-        c = data[i]; n = data[i+1]; nb = abs(n["c"] - n["o"])
-        if c["c"] < c["o"] and n["c"] > n["o"] and nb > avg * 1.5:
-            if c["o"] < price:
-                bull = {"top": c["o"], "bot": c["c"], "mid": (c["o"] + c["c"]) / 2}
-        elif c["c"] > c["o"] and n["c"] < n["o"] and nb > avg * 1.5:
-            if c["o"] > price:
-                bear = {"top": c["c"], "bot": c["o"], "mid": (c["c"] + c["o"]) / 2}
-    return {"bull": bull, "bear": bear}
-
-def detect_sweep(candles):
-    """Liquidity sweep - price takes stops then reverses."""
-    data = candles[-20:]
-    if len(data) < 8:
-        return {"bull": False, "bear": False}
-    recent = data[:-3]; last3 = data[-3:]
-    ph = max(c["h"] for c in recent); pl = min(c["l"] for c in recent)
-    lh = max(c["h"] for c in last3);  ll = min(c["l"] for c in last3)
-    lc = data[-1]["c"]
+        if c2["l"] > c0["h"]:
+            sz = (c2["l"] - c0["h"]) / max(c0["h"], 1) * 100
+            if sz > 0.05:
+                bull.append({"top": c2["l"], "bot": c0["h"],
+                             "mid": (c2["l"] + c0["h"]) / 2, "sz": sz})
+        elif c2["h"] < c0["l"]:
+            sz = (c0["l"] - c2["h"]) / max(c0["l"], 1) * 100
+            if sz > 0.05:
+                bear.append({"top": c0["l"], "bot": c2["h"],
+                             "mid": (c0["l"] + c2["h"]) / 2, "sz": sz})
+    nb = [f for f in bull if f["top"] <= price * 1.03]
+    nb2= [f for f in bear if f["bot"] >= price * 0.97]
     return {
-        "bull": bool(ll < pl and lc > pl),
-        "bear": bool(lh > ph and lc < ph),
-        "prev_high": ph,
-        "prev_low":  pl,
+        "bull": nb[-1]  if nb  else None,
+        "bear": nb2[-1] if nb2 else None,
     }
 
-def detect_market_context(candles, oi_delta):
-    """
-    Determine: Continuation / Manipulation / Reversal
-    Based on OI + price + CVD.
-    """
-    if len(candles) < 20:
-        return "unknown"
-    price_change = (candles[-1]["c"] - candles[-10]["c"]) / max(candles[-10]["c"], 1) * 100
-    vols = [c["v"] for c in candles[-10:]]
-    avg_vol = sum(vols) / len(vols) if vols else 1
 
-    if abs(oi_delta) > 2 and abs(price_change) > 1:
-        return "continuation"
-    if oi_delta > 2 and abs(price_change) < 0.5:
-        return "manipulation"  # OI rising but price stuck = accumulation before move
-    if abs(price_change) > 3 and oi_delta < 0:
-        return "reversal_likely"
-    return "consolidation"
-
-# ?? Full analysis per the trading prompt ?????????????????
-
-async def full_analysis(sym: str, sig_type: str, channel_oi_data: dict) -> dict:
-    """
-    Full Smart Money analysis:
-    - Collects all data
-    - Applies 4-pillar confidence (OI 25% + CVD 25% + Liq 25% + Structure 25%)
-    - Determines scenario (Continuation/Reversal)
-    - Filters: confidence >=70%, expected move >=2%, risk <=1%
-    - ALWAYS returns a result with explanation
-    """
-    result_base = {
-        "symbol":    sym,
-        "sig_type":  sig_type,
-        "decision":  "NO TRADE",
-        "reasons":   [],
-        "filters":   [],
-        "scenario":  "unknown",
-        "data":      {},
+def ob(candles: list, price: float) -> dict:
+    data = candles[-80:]
+    avg  = sum(abs(c["c"] - c["o"]) for c in data) / max(len(data), 1)
+    bull = []; bear = []
+    for i in range(1, len(data) - 1):
+        c = data[i]; n = data[i+1]
+        nb = abs(n["c"] - n["o"])
+        if c["c"] < c["o"] and n["c"] > n["o"] and nb > avg * 1.5:
+            bull.append({"top": c["o"], "bot": c["c"],
+                         "mid": (c["o"] + c["c"]) / 2})
+        elif c["c"] > c["o"] and n["c"] < n["o"] and nb > avg * 1.5:
+            bear.append({"top": c["c"], "bot": c["o"],
+                         "mid": (c["c"] + c["o"]) / 2})
+    nb_  = [z for z in bull if z["top"] <= price * 1.03]
+    nb2_ = [z for z in bear if z["bot"] >= price * 0.97]
+    return {
+        "bull": nb_[-1]  if nb_  else None,
+        "bear": nb2_[-1] if nb2_ else None,
     }
 
-    # Step 1: Check symbol exists on Binance Futures
-    exists = await check_symbol_exists(sym)
-    if not exists:
-        result_base["decision"]   = "NO TRADE"
-        result_base["skip_reason"] = f"{sym} not found on Binance Futures"
-        result_base["filters"].append(f"{sym} not listed on Binance Futures - cannot analyze")
-        return result_base
 
-    # Step 2: Fetch all data in parallel
-    try:
-        ticker, c5m, c1m, oi, funding, liqs, ob_data, ls = await asyncio.gather(
-            fetch_ticker(sym),
-            fetch_klines(sym, "5m", 100),
-            fetch_klines(sym, "1m", 60),
-            fetch_oi(sym),
-            fetch_funding(sym),
-            fetch_liqs(sym),
-            fetch_ob(sym),
-            fetch_ls(sym),
-        )
-    except Exception as e:
-        result_base["skip_reason"] = f"Data fetch error: {e}"
-        return result_base
+def sweep(candles: list) -> dict:
+    data = candles[-30:]
+    if len(data) < 8:
+        return {"bull": False, "bear": False, "bull_pct": 0, "bear_pct": 0}
+    recent = data[:-4]; last4 = data[-4:]
+    ph  = max(c["h"] for c in recent)
+    pl  = min(c["l"] for c in recent)
+    lh  = max(c["h"] for c in last4)
+    ll  = min(c["l"] for c in last4)
+    lc  = data[-1]["c"]
+    b   = bool(ll < pl and lc > pl)
+    be  = bool(lh > ph and lc < ph)
+    return {
+        "bull":     b,
+        "bear":     be,
+        "bull_pct": (pl - ll) / max(pl, 1) * 100 if b  else 0,
+        "bear_pct": (lh - ph) / max(ph, 1) * 100 if be else 0,
+    }
 
-    if not ticker or not c5m:
-        result_base["skip_reason"] = f"No market data for {sym}"
-        return result_base
+
+def flat(candles: list) -> bool:
+    if len(candles) < 15: return True
+    data = candles[-15:]
+    rng  = max(c["h"] for c in data) - min(c["l"] for c in data)
+    return rng / max(min(c["l"] for c in data), 1) * 100 < 0.8
+
+
+def atr(candles: list, n: int = 14) -> float:
+    if not candles: return 0
+    recent = candles[-n:] if len(candles) >= n else candles
+    return sum(c["h"] - c["l"] for c in recent) / max(len(recent), 1)
+
+
+# ?? CONFIDENCE SCORING ????????????????????????????????????????????????????????
+def score(
+    sig_type: str, ticker: dict, oi_data: dict, fund: dict,
+    liqs_data: dict, ob_data: dict, ls_data: dict,
+    cvd_data: dict, lvl: dict, fvg_data: dict, ob_zones: dict,
+    sw: dict, msg_oi_15m: float, msg_oi_1h: float, msg_fr: float,
+) -> tuple[int, int, list, list]:
 
     price  = ticker["price"]
     change = ticker["change"]
-    volume = ticker["volume"]
 
-    # Step 3: Compute all SM indicators
-    cvd    = compute_cvd(c5m)
-    liq    = find_liquidity(c5m, price)
-    fvg    = find_fvg(c5m, price)
-    ob     = find_ob(c5m, price)
-    sweep  = detect_sweep(c5m)
+    # Use best available OI data (message or API)
+    d15 = oi_data["d15"] if abs(oi_data["d15"]) > abs(msg_oi_15m) else msg_oi_15m
+    d1h = oi_data["d1h"] if abs(oi_data["d1h"]) > abs(msg_oi_1h)  else msg_oi_1h
+    fr  = fund["rate"] if fund["rate"] != 0 else msg_fr
+    liq_r   = liqs_data["ratio"]
+    imb     = ob_data["imb"]
+    ls_ratio= ls_data["ratio"]
+    bp      = cvd_data["bp"]
+    div     = cvd_data["div"]
 
-    d15    = oi["delta_15m"]
-    d1h    = oi["delta_1h"]
-    fr     = funding["rate"]
-    liq_r  = liqs["ratio"]
-    im     = ob_data["imbalance"]
-    ls_r   = ls["ratio"]
-    bp     = cvd["buying_pressure"]
+    sl = ss = 0.0
+    rl = []; rs = []
 
-    # Use channel data if available (OI from channel message)
-    if channel_oi_data.get("oi_15m_pct"):
-        d15 = channel_oi_data["oi_15m_pct"]
-    if channel_oi_data.get("oi_1h_pct"):
-        d1h = channel_oi_data["oi_1h_pct"]
-
-    context = detect_market_context(c5m, d15)
-
-    # Step 4: Determine scenario
-    # Continuation Long: pump + OI up + CVD up + short liqs
-    # Continuation Short: dump + OI up + CVD down + long liqs
-    # Reversal Short: strong pump + CVD divergence + sweep high
-    # Reversal Long: strong dump + CVD up + sweep low
-    scenario = "none"
-    if sig_type == "pump":
-        if d15 > 2 and cvd["trend"] == "rising" and liq_r > 1.5:
-            scenario = "CONTINUATION_LONG"
-        elif d15 > 3 and cvd["divergence"] == -1 and sweep["bear"]:
-            scenario = "REVERSAL_SHORT"
-        elif d15 > 2 and cvd["trend"] == "rising":
-            scenario = "CONTINUATION_LONG"
-    elif sig_type == "dump":
-        if d15 > 0 and cvd["trend"] == "falling" and liq_r < 0.7:
-            scenario = "CONTINUATION_SHORT"
-        elif liqs["total"] > 0 and cvd["divergence"] == 1 and sweep["bull"]:
-            scenario = "REVERSAL_LONG"
-        elif d15 < -2 and cvd["trend"] == "falling":
-            scenario = "CONTINUATION_SHORT"
-
-    # Step 5: 4-Pillar Confidence
-    reasons_long  = []; reasons_short = []
-    ol = 0; os_ = 0   # OI pillar
-    cl = 0; cs  = 0   # CVD pillar
-    ll = 0; ls2 = 0   # Liquidity pillar
-    stl = 0; sts = 0  # Structure pillar
-
-    # --- PILLAR 1: OI (25pts) ---
+    # PILLAR 1: OI (max 25pts)
+    # Strong OI increase + price up = longs
     if d15 > 5:
-        ol += 20; reasons_long.append(f"OI +{d15:.1f}% spike - aggressive longs entering")
+        sl += 20; rl.append(f"OI +{d15:.1f}% spike 15m - aggressive longs")
     elif d15 > 2 and change > 0:
-        ol += 14; reasons_long.append(f"OI +{d15:.1f}% + price up - long accumulation")
+        sl += 14; rl.append(f"OI +{d15:.1f}% + price up - long accumulation")
     elif d15 > 2 and change < 0:
-        os_ += 14; reasons_short.append(f"OI +{d15:.1f}% + price down - shorts building")
-    elif d15 < -3:
-        os_ += 14; reasons_short.append(f"OI -{abs(d15):.1f}% - longs closing, bearish")
-    elif d15 < -1:
-        os_ += 8; reasons_short.append(f"OI -{abs(d15):.1f}% - slight OI reduction")
+        ss += 14; rs.append(f"OI +{d15:.1f}% + price down - shorts building")
+    elif d15 < -5:
+        ss += 18; rs.append(f"OI -{abs(d15):.1f}% 15m - mass long exit, bearish")
+    elif d15 < -2:
+        ss += 10; rs.append(f"OI -{abs(d15):.1f}% - longs closing")
 
-    if funding["extreme_short"]:
-        ol  += 12; reasons_long.append(f"Funding oversold {fr*100:.4f}% - long squeeze incoming")
-    elif funding["extreme_long"]:
-        os_ += 12; reasons_short.append(f"Funding overbought {fr*100:.4f}% - short squeeze incoming")
+    if d1h > 8:
+        sl += 5; rl.append(f"OI 1H +{d1h:.1f}% - sustained bullish pressure")
+    elif d1h < -8:
+        ss += 5; rs.append(f"OI 1H -{abs(d1h):.1f}% - sustained bearish pressure")
 
+    # Funding
+    if fund["ext_short"]:
+        sl += 8; rl.append(f"Funding extreme negative {fr*100:.4f}% - long squeeze imminent")
+    elif fund["ext_long"]:
+        ss += 8; rs.append(f"Funding extreme positive {fr*100:.4f}% - short squeeze imminent")
+    elif fr < -0.003:
+        sl += 4; rl.append(f"Funding negative {fr*100:.4f}% - bullish bias")
+    elif fr > 0.003:
+        ss += 4; rs.append(f"Funding positive {fr*100:.4f}% - bearish bias")
+
+    # Liquidations
     if liq_r > 3:
-        ol  += 10; reasons_long.append(f"Mass long liqs x{liq_r:.1f} - bull reversal pressure")
-    elif liq_r > 2:
-        ol  += 6;  reasons_long.append(f"Long liqs x{liq_r:.1f} - bullish signal")
+        sl += 8; rl.append(f"Mass long liqs x{liq_r:.1f} - bull reversal expected")
+    elif liq_r > 1.8:
+        sl += 4; rl.append(f"Long liqs x{liq_r:.1f} - slight bull bias")
     elif liq_r < 0.33:
-        os_ += 10; reasons_short.append(f"Mass short liqs x{1/max(liq_r,.001):.1f} - bear pressure")
-    elif liq_r < 0.5:
-        os_ += 6;  reasons_short.append(f"Short liqs ratio {liq_r:.2f} - bearish signal")
+        ss += 8; rs.append("Mass short liqs - bear reversal expected")
+    elif liq_r < 0.55:
+        ss += 4; rs.append(f"Short liqs x{1/max(liq_r,0.001):.1f} - slight bear bias")
 
-    if ls_r < 0.7:
-        ol  += 5; reasons_long.append(f"L/S ratio {ls_r:.2f} - crowd short = squeeze up")
-    elif ls_r > 1.4:
-        os_ += 5; reasons_short.append(f"L/S ratio {ls_r:.2f} - crowd long = squeeze down")
+    # L/S ratio
+    if ls_ratio < 0.7:
+        sl += 5; rl.append(f"L/S {ls_ratio:.2f} - crowd short = long squeeze likely")
+    elif ls_ratio > 1.4:
+        ss += 5; rs.append(f"L/S {ls_ratio:.2f} - crowd long = short squeeze likely")
 
-    # --- PILLAR 2: CVD (25pts) ---
-    if cvd["divergence"] == 1:
-        cl += 20; reasons_long.append("CVD bullish div: price down but buying pressure UP")
-    elif cvd["divergence"] == -1:
-        cs += 20; reasons_short.append("CVD bearish div: price up but selling pressure UP")
+    # Signal type from channel
+    if sig_type == "pump":
+        sl += 3; rl.append("Channel: OI pump alert")
+    elif sig_type == "dump":
+        ss += 3; rs.append("Channel: OI dump alert")
+
+    score_l_oi = min(25, sl); score_s_oi = min(25, ss)
+
+    # PILLAR 2: CVD / Order Flow (max 25pts)
+    cl = cs = 0.0
+
+    if div == 1:
+        cl += 18; rl.append("CVD bullish divergence: price falls but buyers dominate")
+    elif div == -1:
+        cs += 18; rs.append("CVD bearish divergence: price rises but sellers dominate")
+
     if bp > 65:
-        cl += 12; reasons_long.append(f"Buy pressure {bp:.0f}% - aggressive buyers dominating")
-    elif bp > 55:
-        cl += 6;  reasons_long.append(f"Buy pressure {bp:.0f}% - slight long bias")
+        cl += 10; rl.append(f"Buy pressure {bp:.0f}% - aggressive buyers in market")
     elif bp < 35:
-        cs += 12; reasons_short.append(f"Sell pressure {100-bp:.0f}% - aggressive sellers dominating")
-    elif bp < 45:
-        cs += 6;  reasons_short.append(f"Sell pressure {100-bp:.0f}% - slight short bias")
-    if im > 0.2:
-        cl += 8; reasons_long.append(f"OB strong buy imbalance {im:+.2f}")
-    elif im > 0.1:
-        cl += 4; reasons_long.append(f"OB buy imbalance {im:+.2f}")
-    elif im < -0.2:
-        cs += 8; reasons_short.append(f"OB strong sell imbalance {im:+.2f}")
-    elif im < -0.1:
-        cs += 4; reasons_short.append(f"OB sell imbalance {im:+.2f}")
+        cs += 10; rs.append(f"Sell pressure {100-bp:.0f}% - aggressive sellers in market")
 
-    # --- PILLAR 3: LIQUIDITY (25pts) ---
-    if sweep["bull"]:
-        ll  += 20; reasons_long.append("Liquidity Sweep: stops below taken, price reversed UP")
-    if sweep["bear"]:
-        ls2 += 20; reasons_short.append("Liquidity Sweep: stops above taken, price reversed DOWN")
-    if fvg["bull"]:
-        ll  += 8; reasons_long.append(f"Bullish FVG zone: {fvg['bull']['bot']:.6f}-{fvg['bull']['top']:.6f}")
-    if fvg["bear"]:
-        ls2 += 8; reasons_short.append(f"Bearish FVG zone: {fvg['bear']['bot']:.6f}-{fvg['bear']['top']:.6f}")
-    if ob["bull"]:
-        ll  += 7; reasons_long.append(f"Bullish OB: {ob['bull']['bot']:.6f}-{ob['bull']['top']:.6f}")
-    if ob["bear"]:
-        ls2 += 7; reasons_short.append(f"Bearish OB: {ob['bear']['bot']:.6f}-{ob['bear']['top']:.6f}")
-    if liq["above"]:
-        ll  += 5; reasons_long.append(f"Liquidity pool above: {liq['above'][0]:.6f} - magnet target")
-    if liq["below"]:
-        ls2 += 5; reasons_short.append(f"Liquidity pool below: {liq['below'][0]:.6f} - magnet target")
+    if cvd_data["absorb"]:
+        if change >= 0:
+            cl += 7; rl.append("Absorption: large vol, tiny body = smart money buying")
+        else:
+            cs += 7; rs.append("Absorption: large vol, tiny body = smart money selling")
 
-    # --- PILLAR 4: STRUCTURE (25pts) ---
-    pp = (price - liq["day_low"]) / max(liq["day_high"] - liq["day_low"], 0.001) * 100
+    if imb > 0.20:
+        cl += 7; rl.append(f"OB imbalance {imb:+.2f} - buy side dominant")
+    elif imb > 0.10:
+        cl += 4; rl.append(f"OB imbalance {imb:+.2f} - mild buy pressure")
+    elif imb < -0.20:
+        cs += 7; rs.append(f"OB imbalance {imb:+.2f} - sell side dominant")
+    elif imb < -0.10:
+        cs += 4; rs.append(f"OB imbalance {imb:+.2f} - mild sell pressure")
+
+    score_l_cvd = min(25, cl); score_s_cvd = min(25, cs)
+
+    # PILLAR 3: LIQUIDITY (max 25pts)
+    ll = ls2 = 0.0
+
+    # Sweep = most important signal in SM
+    if sw["bull"]:
+        ll  += 22; rl.append(f"SWEEP: stops below taken ({sw['bull_pct']:.2f}%), price returned -> LONG")
+    if sw["bear"]:
+        ls2 += 22; rs.append(f"SWEEP: stops above taken ({sw['bear_pct']:.2f}%), price returned -> SHORT")
+
+    # FVG zones
+    if fvg_data["bull"]:
+        f = fvg_data["bull"]
+        ll  += 7; rl.append(f"Bullish FVG: {f['bot']:.6f} - {f['top']:.6f} ({f['sz']:.2f}%)")
+    if fvg_data["bear"]:
+        f = fvg_data["bear"]
+        ls2 += 7; rs.append(f"Bearish FVG: {f['bot']:.6f} - {f['top']:.6f} ({f['sz']:.2f}%)")
+
+    # Order Blocks
+    if ob_zones["bull"]:
+        ll  += 6; rl.append(f"Bullish OB: {ob_zones['bull']['bot']:.6f} - {ob_zones['bull']['top']:.6f}")
+    if ob_zones["bear"]:
+        ls2 += 6; rs.append(f"Bearish OB: {ob_zones['bear']['bot']:.6f} - {ob_zones['bear']['top']:.6f}")
+
+    # Equal highs/lows as targets
+    if lvl["above"]:
+        ll  += 5; rl.append(f"Equal highs above {lvl['above'][0]:.6f} - liquidity magnet")
+    if lvl["below"]:
+        ls2 += 5; rs.append(f"Equal lows below {lvl['below'][0]:.6f} - liquidity magnet")
+
+    score_l_liq = min(25, ll); score_s_liq = min(25, ls2)
+
+    # PILLAR 4: STRUCTURE (max 25pts)
+    stl = sts = 0.0
+
+    # Price position in 24H range
+    rng = max(lvl["hi24"] - lvl["lo24"], 0.001)
+    pp  = (price - lvl["lo24"]) / rng * 100
+
     if pp < 20:
-        stl += 15; reasons_long.append(f"Price near 24H low ({pp:.0f}%) - reversal zone")
-    elif pp < 35:
-        stl += 8;  reasons_long.append(f"Price in lower 24H range ({pp:.0f}%) - long bias")
+        stl += 10; rl.append(f"Price near 24H low ({pp:.0f}%) - upside potential")
     elif pp > 80:
-        sts += 15; reasons_short.append(f"Price near 24H high ({pp:.0f}%) - reversal zone")
-    elif pp > 65:
-        sts += 8;  reasons_short.append(f"Price in upper 24H range ({pp:.0f}%) - short bias")
+        sts += 10; rs.append(f"Price near 24H high ({pp:.0f}%) - downside potential")
 
-    # Scenario bonus
-    if scenario == "CONTINUATION_LONG":
-        stl += 12; reasons_long.append("Scenario: CONTINUATION LONG (OI+CVD+Liqs aligned)")
-    elif scenario == "CONTINUATION_SHORT":
-        sts += 12; reasons_short.append("Scenario: CONTINUATION SHORT (OI+CVD+Liqs aligned)")
-    elif scenario == "REVERSAL_LONG":
-        stl += 15; reasons_long.append("Scenario: REVERSAL LONG (post-dump, sweep + CVD div)")
-    elif scenario == "REVERSAL_SHORT":
-        sts += 15; reasons_short.append("Scenario: REVERSAL SHORT (post-pump, sweep + CVD div)")
+    # Scenario detection
+    if sig_type == "dump" and d15 < -3 and div == 1 and sw["bull"]:
+        stl += 12; rl.append("REVERSAL LONG: dump liqs done + CVD turning up + sweep low")
+    elif sig_type == "dump" and d15 < -3 and div == -1:
+        sts += 12; rs.append("CONTINUATION SHORT: OI down + price down + CVD bearish")
+    elif sig_type == "pump" and d15 > 3 and div == 1:
+        stl += 10; rl.append("CONTINUATION LONG: OI up + price up + CVD bullish")
+    elif sig_type == "pump" and d15 > 5 and div == -1 and sw["bear"]:
+        sts += 12; rs.append("REVERSAL SHORT: OI spike + CVD bearish div + sweep high")
+    elif abs(d15) > 3 and abs(change) < 0.5:
+        stl += 4; sts += 4  # manipulation - slight bias both ways
+        rl.append("MANIPULATION: OI moving but price static - explosion imminent")
 
-    # Context
-    if context == "manipulation":
-        stl += 8; sts += 8
-        reasons_long.append("Context: MANIPULATION - OI building, move incoming soon")
+    # Anti-pump: already moved hard without pullback
+    if abs(change) > 5 and not sw["bull"] and not sw["bear"]:
+        stl = max(0, stl - 8)
+        sts = max(0, sts - 8)
+        rl.append(f"Anti-pump: {change:.1f}% move without pullback - confidence reduced")
+        rs.append(f"Anti-pump: {change:.1f}% move without pullback - confidence reduced")
 
-    # Anti-pump rule: don't enter after 3-5% move without pullback
-    anti_pump_filter = False
-    if sig_type == "pump" and change > 3 and not sweep["bear"] and not fvg["bull"]:
-        anti_pump_filter = True
-    if sig_type == "dump" and change < -3 and not sweep["bull"] and not fvg["bear"]:
-        anti_pump_filter = True
+    score_l_str = min(25, stl); score_s_str = min(25, sts)
 
-    # Step 6: Final confidence scores
-    conf_long  = int(min(25, ol) + min(25, cl) + min(25, ll) + min(25, stl))
-    conf_short = int(min(25, os_) + min(25, cs) + min(25, ls2) + min(25, sts))
+    conf_l = int(score_l_oi + score_l_cvd + score_l_liq + score_l_str)
+    conf_s = int(score_s_oi + score_s_cvd + score_s_liq + score_s_str)
 
-    # Step 7: Decision
-    direction  = None
-    confidence = 0
-    reasons    = []
+    return conf_l, conf_s, rl, rs
 
-    if anti_pump_filter:
-        result_base["filters"].append(
-            f"ANTI-PUMP RULE: {change:.1f}% move already happened without pullback - NOT ENTERING"
-        )
 
-    if not anti_pump_filter:
-        if conf_long >= 70 and conf_long > conf_short:
-            direction = "LONG"; confidence = conf_long; reasons = reasons_long
-        elif conf_short >= 70 and conf_short > conf_long:
-            direction = "SHORT"; confidence = conf_short; reasons = reasons_short
+# ?? ENTRY / SL / TP CALCULATION ???????????????????????????????????????????????
+def calc_levels(
+    direction: str, price: float, atr_val: float,
+    fvg_data: dict, ob_zones: dict, lvl: dict, ticker: dict
+) -> dict:
 
-    # Step 8: TP / SL calculation (if entering)
-    entry = price; sl_val = 0; tp1 = 0; tp2 = 0; tp3 = 0
-    leverage = 0; expected_move = 0; risk_pct = 0; potential_profit = 0
+    if direction == "LONG":
+        # Entry: price or nearest FVG/OB mid if close enough
+        entry = price
+        if fvg_data["bull"] and abs(fvg_data["bull"]["mid"] - price) / price < 0.01:
+            entry = fvg_data["bull"]["mid"]
+        elif ob_zones["bull"] and abs(ob_zones["bull"]["mid"] - price) / price < 0.01:
+            entry = ob_zones["bull"]["mid"]
 
-    if direction:
-        # Entry zone
-        if direction == "LONG":
-            if fvg["bull"] and abs(fvg["bull"]["mid"] - price) / max(price, 1) < 0.01:
-                entry = fvg["bull"]["mid"]
-            elif ob["bull"] and abs(ob["bull"]["mid"] - price) / max(price, 1) < 0.01:
-                entry = ob["bull"]["mid"]
+        # SL: below nearest structure
+        sl_c = [entry - atr_val * 1.4]
+        if ob_zones["bull"]:  sl_c.append(ob_zones["bull"]["bot"] * 0.997)
+        if fvg_data["bull"]:  sl_c.append(fvg_data["bull"]["bot"] * 0.997)
+        sl   = max(sl_c)
+        sl_d = max(entry - sl, atr_val * 0.5)
+
+        # TP: next liquidity pools (equal highs, 24H high)
+        tp1 = entry + sl_d * 1.5
+        tp2 = entry + sl_d * 2.5
+        if lvl["above"]:
+            tp3 = max(lvl["above"][0] * 0.999, entry + sl_d * 3.5)
         else:
-            if fvg["bear"] and abs(fvg["bear"]["mid"] - price) / max(price, 1) < 0.01:
-                entry = fvg["bear"]["mid"]
-            elif ob["bear"] and abs(ob["bear"]["mid"] - price) / max(price, 1) < 0.01:
-                entry = ob["bear"]["mid"]
+            tp3 = entry + sl_d * 4.0
+        # Cap at 24H high if reasonable
+        if ticker["high"] > entry * 1.02:
+            tp3 = max(tp3, ticker["high"] * 0.999)
 
-        # SL - behind structure
-        recent  = c5m[-20:]
-        avg_rng = sum(c["h"] - c["l"] for c in recent) / max(len(recent), 1)
-        atr     = avg_rng * 1.2
+    else:  # SHORT
+        entry = price
+        if fvg_data["bear"] and abs(fvg_data["bear"]["mid"] - price) / price < 0.01:
+            entry = fvg_data["bear"]["mid"]
+        elif ob_zones["bear"] and abs(ob_zones["bear"]["mid"] - price) / price < 0.01:
+            entry = ob_zones["bear"]["mid"]
 
-        if direction == "LONG":
-            sl_candidates = [entry - atr * 1.5]
-            if ob["bull"]:  sl_candidates.append(ob["bull"]["bot"] * 0.997)
-            if fvg["bull"]: sl_candidates.append(fvg["bull"]["bot"] * 0.997)
-            sl_val = max(sl_candidates)
+        sl_c = [entry + atr_val * 1.4]
+        if ob_zones["bear"]:  sl_c.append(ob_zones["bear"]["top"] * 1.003)
+        if fvg_data["bear"]:  sl_c.append(fvg_data["bear"]["top"] * 1.003)
+        sl   = min(sl_c)
+        sl_d = max(sl - entry, atr_val * 0.5)
+
+        tp1 = entry - sl_d * 1.5
+        tp2 = entry - sl_d * 2.5
+        if lvl["below"]:
+            tp3 = min(lvl["below"][0] * 1.001, entry - sl_d * 3.5)
         else:
-            sl_candidates = [entry + atr * 1.5]
-            if ob["bear"]:  sl_candidates.append(ob["bear"]["top"] * 1.003)
-            if fvg["bear"]: sl_candidates.append(fvg["bear"]["top"] * 1.003)
-            sl_val = min(sl_candidates)
+            tp3 = entry - sl_d * 4.0
+        if ticker["low"] < entry * 0.98:
+            tp3 = min(tp3, ticker["low"] * 1.001)
 
-        risk_pct = abs(entry - sl_val) / max(entry, 1) * 100
+    risk_pct      = abs(entry - sl)  / max(entry, 1) * 100
+    expected_move = abs(tp2 - entry) / max(entry, 1) * 100
+    rr            = abs(tp2 - entry) / max(abs(sl - entry), 0.0001)
+    leverage      = max(3, min(20, int(40 / max(expected_move, 1))))
+    pot_profit    = round(expected_move * leverage, 1)
 
-        # TP targets = liquidity pools
-        sl_d = abs(entry - sl_val)
-        if direction == "LONG":
-            tp1 = entry + sl_d * 1.5
-            tp2 = entry + sl_d * 2.5
-            tp3 = liq["above"][0] * 0.999 if liq["above"] else entry + sl_d * 4.0
-            tp3 = max(tp3, entry + sl_d * 3.0)
-        else:
-            tp1 = entry - sl_d * 1.5
-            tp2 = entry - sl_d * 2.5
-            tp3 = liq["below"][0] * 1.001 if liq["below"] else entry - sl_d * 4.0
-            tp3 = min(tp3, entry - sl_d * 3.0)
-
-        expected_move = abs(tp2 - entry) / max(entry, 1) * 100
-        leverage      = max(3, min(20, int(40 / max(expected_move, 0.1))))
-        potential_profit = round(expected_move * leverage, 1)
-
-        # Apply filters
-        if risk_pct > 1.0:
-            result_base["filters"].append(f"RISK FILTER: {risk_pct:.2f}% > 1% max - NOT ENTERING")
-            direction = None
-        elif expected_move < 2.0:
-            result_base["filters"].append(f"MOVE FILTER: Expected {expected_move:.1f}% < 2% min - NOT ENTERING")
-            direction = None
-
-    # Step 9: Build full result
-    result = {
-        "symbol":           sym,
-        "sig_type":         sig_type,
-        "decision":         direction if direction else "NO TRADE",
-        "scenario":         scenario,
-        "context":          context,
-        "confidence":       confidence,
-        "conf_long":        conf_long,
-        "conf_short":       conf_short,
-        "price":            price,
-        "change_24h":       change,
-        "volume_24h":       volume,
-        "entry":            round(entry,    8) if direction else 0,
-        "sl":               round(sl_val,   8) if direction else 0,
-        "tp1":              round(tp1,      8) if direction else 0,
-        "tp2":              round(tp2,      8) if direction else 0,
-        "tp3":              round(tp3,      8) if direction else 0,
-        "expected_move":    round(expected_move, 2),
-        "risk_pct":         round(risk_pct,  3),
-        "leverage":         leverage,
-        "potential_profit": potential_profit,
-        "reasons":          reasons[:6],
-        "filters":          result_base.get("filters", []),
-        "data": {
-            "oi_15m":          d15,
-            "oi_1h":           d1h,
-            "funding":         fr,
-            "liq_ratio":       liq_r,
-            "ob_imb":          im,
-            "cvd_div":         cvd["divergence"],
-            "buying_pressure": bp,
-            "ls_ratio":        ls_r,
-            "sweep_bull":      sweep["bull"],
-            "sweep_bear":      sweep["bear"],
-            "has_fvg_bull":    fvg["bull"] is not None,
-            "has_fvg_bear":    fvg["bear"] is not None,
-            "liq_above":       liq["above"],
-            "liq_below":       liq["below"],
-            "day_high":        liq["day_high"],
-            "day_low":         liq["day_low"],
-            "price_position":  round((price - liq["day_low"]) / max(liq["day_high"] - liq["day_low"], 0.001) * 100, 1),
-        },
+    return {
+        "entry":    round(entry, 8),
+        "sl":       round(sl,    8),
+        "tp1":      round(tp1,   8),
+        "tp2":      round(tp2,   8),
+        "tp3":      round(tp3,   8),
+        "risk_pct": round(risk_pct, 3),
+        "exp_move": round(expected_move, 2),
+        "leverage": leverage,
+        "pot_prof": pot_profit,
+        "rr":       round(rr, 2),
     }
 
-    if "skip_reason" in result_base:
-        result["skip_reason"] = result_base["skip_reason"]
 
-    return result
+# ?? MAIN ANALYSIS ?????????????????????????????????????????????????????????????
+async def analyze(parsed: dict) -> dict:
+    sym      = parsed["symbol"]
+    sig_type = parsed["sig_type"]
+
+    # 1. Check symbol exists on Binance Futures
+    if not await symbol_exists(sym):
+        return {
+            "decision": "NO TRADE",
+            "symbol":   sym,
+            "reason":   f"{sym} not listed on Binance Futures",
+            "no_symbol":True,
+        }
+
+    # 2. Fetch all data in parallel
+    results = await asyncio.gather(
+        fetch_ticker(sym),
+        fetch_klines(sym, "5m",  100),
+        fetch_klines(sym, "15m", 60),
+        fetch_oi(sym),
+        fetch_funding(sym),
+        fetch_liqs(sym),
+        fetch_ob(sym),
+        fetch_ls(sym),
+        return_exceptions=True,
+    )
+
+    ticker = results[0]; c5m = results[1]; c15m = results[2]
+    oi_d   = results[3]; fund = results[4]; liqs_ = results[5]
+    ob_d   = results[6]; ls_  = results[7]
+
+    # Safe defaults on any fetch failure
+    if not ticker or isinstance(ticker, Exception):
+        return {"decision":"NO TRADE","symbol":sym,"reason":"Cannot fetch market data from Binance Futures"}
+
+    def safe(v, default):
+        return default if (v is None or isinstance(v, Exception)) else v
+
+    c5m   = safe(c5m,   [])
+    c15m  = safe(c15m,  [])
+    oi_d  = safe(oi_d,  {"d15": parsed["msg_oi_15m"], "d1h": parsed["msg_oi_1h"], "cur": 0})
+    fund  = safe(fund,  {"rate": parsed["msg_fr"], "ext_long": False, "ext_short": False})
+    liqs_ = safe(liqs_, {"ratio": 1.0, "long_usd": 0, "short_usd": 0, "total": 0})
+    ob_d  = safe(ob_d,  {"imb": 0})
+    ls_   = safe(ls_,   {"ratio": 1.0})
+
+    price = ticker["price"]
+
+    # 3. SM Detectors
+    cvd_d  = cvd(c5m)    if c5m  else {"div": 0, "bp": 50, "absorb": False, "up": False, "dn": False}
+    lvl_d  = eq_levels(c5m, price) if c5m else {"above": [], "below": [], "hi24": price*1.05, "lo24": price*0.95}
+    fvg_d  = fvg(c5m, price)       if c5m else {"bull": None, "bear": None}
+    ob_z   = ob(c5m, price)         if c5m else {"bull": None, "bear": None}
+    sw_d   = sweep(c5m)             if c5m else {"bull": False, "bear": False, "bull_pct": 0, "bear_pct": 0}
+    is_flt = flat(c5m)              if c5m else True
+    atr_v  = atr(c5m)               if c5m else price * 0.005
+
+    # 4. Flat market filter
+    if is_flt and not sw_d["bull"] and not sw_d["bear"]:
+        return {
+            "decision":   "NO TRADE",
+            "symbol":     sym,
+            "price":      price,
+            "reason":     "Market is flat - no directional setup",
+            "conf_l":     0,
+            "conf_s":     0,
+            "oi_d":       oi_d,
+            "fund":       fund,
+            "liqs":       liqs_,
+            "cvd_d":      cvd_d,
+            "sw_d":       sw_d,
+        }
+
+    # 5. Score
+    conf_l, conf_s, rl, rs = score(
+        sig_type, ticker, oi_d, fund, liqs_, ob_d, ls_,
+        cvd_d, lvl_d, fvg_d, ob_z, sw_d,
+        parsed["msg_oi_15m"], parsed["msg_oi_1h"], parsed["msg_fr"],
+    )
+
+    MIN_CONF = 70
+
+    if conf_l >= MIN_CONF and conf_l > conf_s:
+        direction = "LONG"; confidence = conf_l; reasons = rl
+    elif conf_s >= MIN_CONF and conf_s > conf_l:
+        direction = "SHORT"; confidence = conf_s; reasons = rs
+    else:
+        # NO TRADE - always explain why
+        why = f"Confidence: LONG={conf_l}% SHORT={conf_s}% (need {MIN_CONF}%)"
+        if abs(ticker["change"]) > 5 and not sw_d["bull"] and not sw_d["bear"]:
+            why = f"Anti-pump rule: {ticker['change']:.1f}% move without pullback"
+        elif is_flt:
+            why = "Flat market - no clear direction"
+        elif not fvg_d["bull"] and not fvg_d["bear"] and not ob_z["bull"] and not ob_z["bear"]:
+            why = "No entry zone (FVG/OB) - no structure to trade from"
+
+        return {
+            "decision": "NO TRADE",
+            "symbol":   sym,
+            "price":    price,
+            "reason":   why,
+            "conf_l":   conf_l,
+            "conf_s":   conf_s,
+            "reasons_l":rl[:3],
+            "reasons_s":rs[:3],
+            "oi_d":     oi_d,
+            "fund":     fund,
+            "liqs":     liqs_,
+            "cvd_d":    cvd_d,
+            "sw_d":     sw_d,
+            "volume":   ticker["volume"],
+        }
+
+    # 6. Calculate levels
+    lvls = calc_levels(direction, price, atr_v, fvg_d, ob_z, lvl_d, ticker)
+
+    # 7. Filters
+    if lvls["risk_pct"] > 1.0:
+        return {
+            "decision": "NO TRADE",
+            "symbol":   sym,
+            "price":    price,
+            "reason":   f"Risk {lvls['risk_pct']:.2f}% > 1% max (SL too wide for current volatility)",
+            "conf_l":   conf_l,
+            "conf_s":   conf_s,
+            "reasons_l":rl[:2],
+            "reasons_s":rs[:2],
+        }
+
+    if lvls["exp_move"] < 2.0:
+        return {
+            "decision": "NO TRADE",
+            "symbol":   sym,
+            "price":    price,
+            "reason":   f"Expected move {lvls['exp_move']:.1f}% < 2% minimum",
+            "conf_l":   conf_l,
+            "conf_s":   conf_s,
+            "reasons_l":rl[:2],
+            "reasons_s":rs[:2],
+        }
+
+    return {
+        "decision":   direction,
+        "symbol":     sym,
+        "price":      price,
+        "confidence": confidence,
+        "conf_l":     conf_l,
+        "conf_s":     conf_s,
+        "reasons":    reasons[:6],
+        "sig_type":   sig_type,
+        **lvls,
+        "oi_d":       oi_d,
+        "fund":       fund,
+        "liqs":       liqs_,
+        "cvd_d":      cvd_d,
+        "sw_d":       sw_d,
+        "volume":     ticker["volume"],
+    }
 
 
-def format_result(res: dict) -> str:
-    """
-    Format analysis result for Telegram.
-    ALWAYS sends something - even NO TRADE gets full explanation.
-    """
-    sym    = res.get("symbol", "?")
-    dec    = res.get("decision", "NO TRADE")
-    price  = res.get("price", 0)
-    sig    = res.get("sig_type", "").upper()
-    scene  = res.get("scenario", "none")
-    ctx    = res.get("context", "")
-    data   = res.get("data", {})
-    cl     = res.get("conf_long", 0)
-    cs     = res.get("conf_short", 0)
+# ?? FORMAT OUTPUT ?????????????????????????????????????????????????????????????
+def fmt(res: dict) -> str:
+    sym  = res["symbol"]
+    dec  = res["decision"]
+    p    = res.get("price", 0)
 
-    # Skip reason (symbol not on exchange etc)
-    if res.get("skip_reason"):
+    if res.get("no_symbol"):
         return (
-            f"Analysis: `{sym}` ({sig})\n\n"
-            f"SKIP: {res['skip_reason']}\n\n"
-            f"No data available - cannot analyze."
+            f"TICKER: `{sym}`\n"
+            f"ENTRY: NO\n\n"
+            f"Reason:\n"
+            f"- Symbol not found on Binance Futures\n"
+            f"- May be listed on other exchanges only\n"
+            f"- Cannot analyze without market data"
         )
-
-    # Header with market overview (always shown)
-    pp    = data.get("price_position", 50)
-    d15   = data.get("oi_15m", 0)
-    bp    = data.get("buying_pressure", 50)
-    fr    = data.get("funding", 0)
-    sweep = "Bull sweep" if data.get("sweep_bull") else "Bear sweep" if data.get("sweep_bear") else "No sweep"
-    liq_a = data.get("liq_above", [])
-    liq_b = data.get("liq_below", [])
-
-    header = (
-        f"Analysis: `{sym}` | Signal: *{sig}*\n"
-        f"Price: `${price:,.6f}` | 24H: `{res.get('change_24h', 0):+.2f}%`\n"
-        f"Position in range: `{pp:.0f}%` (0=low, 100=high)\n\n"
-        f"Market data:\n"
-        f"OI 15m: `{d15:+.2f}%` | Scenario: `{scene}`\n"
-        f"CVD: `{data.get('cvd_div', 0):+d}` | Buy pressure: `{bp:.0f}%`\n"
-        f"Funding: `{fr*100:.4f}%` | L/S: `{data.get('ls_ratio', 1):.2f}`\n"
-        f"Liq sweep: `{sweep}`\n"
-    )
-
-    if liq_a:
-        header += f"Liq pools above: `{', '.join(f'${x:.4f}' for x in liq_a[:2])}`\n"
-    if liq_b:
-        header += f"Liq pools below: `{', '.join(f'${x:.4f}' for x in liq_b[:2])}`\n"
-
-    header += (
-        f"\nConfidence: LONG `{cl}%` | SHORT `{cs}%`\n"
-        f"(need 70%+ to enter)\n"
-    )
 
     if dec == "NO TRADE":
-        # Explain WHY we are not entering
-        filters = res.get("filters", [])
-        reasons = res.get("reasons", [])
+        cl = res.get("conf_l", 0); cs = res.get("conf_s", 0)
+        oi15 = res.get("oi_d", {}).get("d15", 0)
+        fr   = res.get("fund",  {}).get("rate", 0) * 100
+        vol  = res.get("volume", 0)
+        cvd_ = res.get("cvd_d", {})
+        sw_  = res.get("sw_d",  {})
+        liqs_= res.get("liqs",  {})
 
-        why_not = ""
-        if cl < 70 and cs < 70:
-            if cl >= cs:
-                why_not = f"Confidence too low: LONG {cl}% / SHORT {cs}%\nNeed 70%+ in one direction."
-            else:
-                why_not = f"Confidence too low: SHORT {cs}% / LONG {cl}%\nNeed 70%+ in one direction."
-        elif filters:
-            why_not = "\n".join(filters)
-        else:
-            why_not = f"No clear setup. LONG={cl}% SHORT={cs}%"
+        lines = [
+            f"TICKER: `{sym}`",
+            f"Price: `${p:,.6f}`",
+            f"ENTRY: NO",
+            "",
+            f"Reason:",
+            f"- {res.get('reason', '-')}",
+            "",
+            f"Market snapshot:",
+            f"- OI 15m: {oi15:+.2f}%",
+            f"- Funding: {fr:.4f}%",
+            f"- Buy pressure: {cvd_.get('bp', 50):.0f}%",
+            f"- CVD div: {'bullish' if cvd_.get('div')==1 else 'bearish' if cvd_.get('div')==-1 else 'none'}",
+            f"- Sweep: {'bull' if sw_.get('bull') else 'bear' if sw_.get('bear') else 'none'}",
+            f"- Liq ratio: {liqs_.get('ratio', 1):.2f}x",
+            f"- Volume 24H: ${vol:,.0f}",
+            f"- Conf LONG={cl}% SHORT={cs}%",
+        ]
 
-        return (
-            header +
-            f"\nDECISION: *NO TRADE*\n\n"
-            f"Why not entering:\n{why_not}\n\n"
-            f"What to watch:\n"
-            + _what_to_watch(data, scene, sig)
-        )
+        if res.get("reasons_l"):
+            lines.append("")
+            lines.append("Bull signals found:")
+            lines += [f"  + {r}" for r in res["reasons_l"]]
 
-    # TRADE signal
+        if res.get("reasons_s"):
+            lines.append("")
+            lines.append("Bear signals found:")
+            lines += [f"  - {r}" for r in res["reasons_s"]]
+
+        return "\n".join(lines)
+
+    # ENTER
     e1 = abs(res["tp1"] - res["entry"]) / max(res["entry"], 1) * 100
     e2 = abs(res["tp2"] - res["entry"]) / max(res["entry"], 1) * 100
     e3 = abs(res["tp3"] - res["entry"]) / max(res["entry"], 1) * 100
+    oi_ = res["oi_d"]; fr_ = res["fund"]["rate"] * 100
 
-    reasons_txt = "\n".join(f"- {r}" for r in res.get("reasons", [])[:5])
+    lines = [
+        f"TICKER: `{sym}`",
+        f"ENTRY: YES",
+        "",
+        f"Type: *{dec}*",
+        "",
+        f"Entry: `${res['entry']:,.6f}`",
+        f"Stop Loss: `${res['sl']:,.6f}` (risk {res['risk_pct']:.2f}%)",
+        "",
+        f"Take Profit:",
+        f"- TP1: `${res['tp1']:,.6f}` (+{e1:.1f}%)",
+        f"- TP2: `${res['tp2']:,.6f}` (+{e2:.1f}%)",
+        f"- TP3: `${res['tp3']:,.6f}` (+{e3:.1f}%)",
+        "",
+        f"Expected Move: `{res['exp_move']}%`",
+        f"Leverage: `{res['leverage']}x`",
+        f"Potential Profit: `+{res['pot_prof']}%`",
+        "",
+        f"Confidence: `{res['confidence']}%`",
+        f"(LONG {res['conf_l']}% / SHORT {res['conf_s']}%)",
+        "",
+        f"Reason:",
+    ]
+    lines += [f"- {r}" for r in res.get("reasons", [])[:6]]
 
-    return (
-        header +
-        f"\nDECISION: *{dec}*\n\n"
-        f"Entry zone: `${res['entry']:,.6f}`\n"
-        f"Stop Loss: `${res['sl']:,.6f}` (risk `{res['risk_pct']:.2f}%`)\n\n"
-        f"TP1: `${res['tp1']:,.6f}` (+{e1:.1f}%)\n"
-        f"TP2: `${res['tp2']:,.6f}` (+{e2:.1f}%)\n"
-        f"TP3: `${res['tp3']:,.6f}` (+{e3:.1f}%)\n\n"
-        f"Expected Move: `{res['expected_move']}%`\n"
-        f"Leverage: `{res['leverage']}x`\n"
-        f"Potential Profit: `+{res['potential_profit']}%`\n\n"
-        f"Confidence: `{res['confidence']}%` | Scenario: `{scene}`\n\n"
-        f"Reasons:\n{reasons_txt}"
-    )
+    lines += [
+        "",
+        f"OI 15m: {oi_['d15']:+.2f}% | 1H: {oi_['d1h']:+.2f}%",
+        f"Funding: {fr_:.4f}%",
+        f"Liq ratio: {res['liqs']['ratio']:.2f}x",
+        f"Buy pressure: {res['cvd_d']['bp']:.0f}%",
+    ]
 
-
-def _what_to_watch(data: dict, scenario: str, sig_type: str) -> str:
-    """Give actionable advice even on NO TRADE."""
-    tips = []
-    if scenario == "manipulation":
-        tips.append("OI building but price stuck - wait for the move direction to confirm")
-    if not data.get("sweep_bull") and not data.get("sweep_bear"):
-        tips.append("No liquidity sweep yet - wait for stop hunt before entering")
-    if not data.get("has_fvg_bull") and not data.get("has_fvg_bear"):
-        tips.append("No FVG/OB zone nearby - entry zone not defined")
-    liq_a = data.get("liq_above", [])
-    liq_b = data.get("liq_below", [])
-    if liq_a:
-        tips.append(f"Liquidity above at ${liq_a[0]:.4f} - possible magnet for price")
-    if liq_b:
-        tips.append(f"Liquidity below at ${liq_b[0]:.4f} - possible sweep target")
-    if not tips:
-        tips.append("Wait for clearer confluence of OI + CVD + Sweep + FVG")
-    return "\n".join(f"- {t}" for t in tips[:4])
+    return "\n".join(lines)
 
 
-# ?? Trade execution ???????????????????????????????????????
-
-async def execute_trade(res: dict, bal_pct: float):
-    """Execute via main server API. Sends all actions to TG."""
-    if res.get("decision") == "NO TRADE":
-        return
+# ?? TRADE EXECUTION ???????????????????????????????????????????????????????????
+async def execute(res: dict, pct: float):
     sym  = res["symbol"]
     side = "BUY" if res["decision"] == "LONG" else "SELL"
     lev  = res["leverage"]
+    tp   = res["tp2"]
+    sl   = res["sl"]
+
+    # Check position limit
+    open_pos = [s for s, p in _positions.items() if p.get("status") == "open"]
+    if len(open_pos) >= MAX_POSITIONS:
+        await tg(
+            f"Agent skipped `{sym}`\n"
+            f"Reason: max {MAX_POSITIONS} simultaneous positions reached\n"
+            f"Open: {', '.join(open_pos)}"
+        )
+        return
+
+    # Check no duplicate
+    if sym in _positions and _positions[sym].get("status") == "open":
+        await tg(f"Agent skipped `{sym}` - position already open")
+        return
 
     try:
+        # Get balance from server
         async with httpx.AsyncClient(timeout=10) as c:
             wr = await c.get(f"{API_URL}/api/wallet/agent_main")
             w  = wr.json()
 
         if not w.get("connected"):
-            await send(f"Agent cannot trade `{sym}` - no exchange connected in Mini App")
+            await tg(
+                f"Agent cannot trade `{sym}`\n"
+                f"Exchange not connected\n"
+                f"Connect API keys in Mini App"
+            )
             return
 
         balance = float(w.get("balance", 0))
         if balance < 10:
-            await send(f"Agent skipped `{sym}` - balance `${balance:.2f}` too low")
+            await tg(f"Agent skipped `{sym}` - balance ${balance:.2f} < $10 minimum")
             return
 
-        amount = max(5.0, round(balance * (bal_pct / 100), 2))
+        amount = round(balance * (pct / 100), 2)
+        amount = max(5.0, amount)
 
-        await send(
-            f"Agent opening `{side}` `{sym}`\n"
-            f"Size: `${amount:.2f}` ({bal_pct}% of `${balance:.2f}`)\n"
+        await tg(
+            f"Agent opening position\n"
+            f"`{side}` `{sym}`\n"
+            f"Size: `${amount:.2f}` ({pct}% of `${balance:.2f}`)\n"
             f"Leverage: `{lev}x`\n"
             f"Entry: `${res['entry']:,.6f}`\n"
-            f"TP2: `${res['tp2']:,.6f}` | SL: `${res['sl']:,.6f}`"
+            f"SL: `${sl:,.6f}` | TP2: `${tp:,.6f}`\n"
+            f"Expected: +{res['pot_prof']}% | Risk: {res['risk_pct']:.2f}%"
         )
 
         async with httpx.AsyncClient(timeout=15) as c:
@@ -777,299 +946,333 @@ async def execute_trade(res: dict, bal_pct: float):
 
         if result.get("success"):
             t = result.get("trade", {})
-            await send(
+            _positions[sym] = {
+                "status":  "open",
+                "side":    side,
+                "entry":   t.get("price", res["entry"]),
+                "tp":      tp,
+                "sl":      sl,
+                "amount":  amount,
+                "leverage":lev,
+                "opened":  time.time(),
+            }
+            await tg(
                 f"Position opened\n"
                 f"`{side}` `{sym}`\n"
                 f"Filled at: `${t.get('price', res['entry']):,.6f}`\n"
                 f"Qty: `{t.get('qty', 0)}`\n"
-                f"Order ID: `{t.get('id', '-')}`\n"
-                f"TP: `${res['tp2']:,.6f}` | SL: `${res['sl']:,.6f}`"
+                f"SL: `${sl:,.6f}` | TP2: `${tp:,.6f}`\n"
+                f"ID: `{t.get('id', '-')}`"
             )
         else:
-            await send(
-                f"Order FAILED for `{sym}`\n"
-                f"Error: {result.get('error', 'Unknown error')}\n"
-                f"Enter manually: {side} `{sym}` @ `${res['entry']:,.6f}`"
+            err = result.get("error", "Unknown error")
+            await tg(
+                f"Order FAILED `{sym}`\n"
+                f"Error: {err}\n"
+                f"Manual: {side} `{sym}` @ `${res['entry']:,.6f}`"
             )
 
     except Exception as e:
-        log.error("execute_trade %s: %s", sym, e)
-        await send(f"Trade error `{sym}`: {str(e)[:100]}")
+        log.error("execute %s: %s", sym, e)
+        await tg(f"Trade error `{sym}`: {str(e)[:120]}")
 
 
-# ?? Parse channel message ?????????????????????????????????
-
-def parse_channel_msg(text: str):
-    """
-    Extract ticker and signal type from @OpenInterestTracker messages.
-    Format: #RLSUSDT open interest decreased/increased X% in Y mins!
-    """
-    if not text:
-        return None, None, {}
-
-    text_upper = text.upper()
-
-    # Extract #TICKER
-    m = re.search(r"#([A-Z0-9]{2,15})", text_upper)
-    if not m:
-        return None, None, {}
-
-    ticker = m.group(1)
-    sym    = ticker if ticker.endswith("USDT") else ticker + "USDT"
-
-    # Detect pump/dump from message
-    text_lower = text.lower()
-    if any(w in text_lower for w in ["decreased", "dropped", "dump", "fall", "bearish", "lost"]):
-        sig_type = "dump"
-    elif any(w in text_lower for w in ["increased", "surged", "pump", "rise", "bullish", "gained"]):
-        sig_type = "pump"
-    else:
-        sig_type = "pump"  # default for OpenInterestTracker
-
-    # Extract OI data from message if present
-    channel_oi = {}
-    m15 = re.search(r"OI 15m.*?([+-]?\d+\.?\d*)%", text)
-    m1h = re.search(r"OI 1H.*?([+-]?\d+\.?\d*)%", text)
-    if m15:
-        try: channel_oi["oi_15m_pct"] = float(m15.group(1))
-        except Exception: pass
-    if m1h:
-        try: channel_oi["oi_1h_pct"] = float(m1h.group(1))
-        except Exception: pass
-
-    return sym, sig_type, channel_oi
-
-
-# ?? Telethon channel reader ???????????????????????????????
-
-async def run_telethon():
+# ?? TELETHON CHANNEL LISTENER ?????????????????????????????????????????????????
+async def run_channel():
     if not TG_API_ID or not TG_API_HASH:
-        log.warning("TG_API_ID/TG_API_HASH not set")
-        await send(
-            "Channel monitor NOT started\n"
-            "Add to Railway Variables:\n"
-            "TG_API_ID = your id from my.telegram.org\n"
-            "TG_API_HASH = your hash\n"
-            "TG_PHONE = +380..."
+        await tg(
+            f"Channel monitor NOT started\n"
+            f"Add to Railway Variables:\n"
+            f"TG_API_ID   = (from my.telegram.org)\n"
+            f"TG_API_HASH = (from my.telegram.org)\n"
+            f"TG_PHONE    = +380yourphone"
         )
         return
 
     try:
         from telethon import TelegramClient, events
 
-        client = TelegramClient("/tmp/axiflow_session", TG_API_ID, TG_API_HASH)
+        client = TelegramClient("/tmp/axiflow", TG_API_ID, TG_API_HASH)
         await client.start(phone=TG_PHONE)
-        log.info("Telethon started - monitoring %s", MONITOR_CHANNEL)
-        await send(
-            f"Channel monitor started\n"
-            f"Monitoring: {MONITOR_CHANNEL}\n"
-            f"Every message will be analyzed\n"
-            f"Agent: {'ON' if agent_active else 'OFF'} | Risk: {balance_pct_setting}%"
+        log.info("Telethon ready - listening %s", CHANNEL)
+
+        await tg(
+            f"AXIFLOW Bot v3 started\n"
+            f"Reading: {CHANNEL}\n"
+            f"Agent: {'ON' if _agent_on else 'OFF'}\n"
+            f"Position size: {_position_pct}% per trade\n"
+            f"Max positions: {MAX_POSITIONS}\n"
+            f"Min confidence: 70%\n"
+            f"Every signal = full analysis sent here"
         )
 
-        @client.on(events.NewMessage(chats=MONITOR_CHANNEL))
-        async def on_new_message(event):
-            global agent_active, balance_pct_setting
+        @client.on(events.NewMessage(chats=CHANNEL))
+        async def on_msg(event):
+            global _agent_on, _position_pct
 
             text = event.message.text or ""
             if not text.strip():
                 return
 
-            log.info("Channel message: %s", text[:100])
+            log.info("Channel: %s", text[:80])
 
-            sym, sig_type, channel_oi = parse_channel_msg(text)
-            if not sym:
-                log.info("No ticker found in message - skipping")
+            parsed = parse_msg(text)
+            if not parsed:
                 return
 
-            # Cooldown check
+            sym = parsed["symbol"]
+
+            # Cooldown
             now = time.time()
-            if now - _analyzed.get(sym, 0) < ANALYZE_COOLDOWN:
-                remaining = int(ANALYZE_COOLDOWN - (now - _analyzed[sym]))
-                log.info("Cooldown %s: %ds remaining", sym, remaining)
+            if now - _cooldown.get(sym, 0) < COOLDOWN_SEC:
+                left = int(COOLDOWN_SEC - (now - _cooldown[sym]))
+                log.info("Cooldown %s: %ds", sym, left)
                 return
+            _cooldown[sym] = now
 
-            _analyzed[sym] = now
-
-            await send(
-                f"Signal received from {MONITOR_CHANNEL}\n"
-                f"Ticker: `{sym}` | Type: *{sig_type.upper()}*\n"
-                f"Running full analysis..."
+            # Notify start
+            await tg(
+                f"Signal from {CHANNEL}\n"
+                f"Symbol: `{sym}` ({parsed['sig_type'].upper()})\n"
+                f"OI 15m: {parsed['msg_oi_15m']:+.2f}%\n"
+                f"OI 1H: {parsed['msg_oi_1h']:+.2f}%\n"
+                f"Analyzing..."
             )
 
             try:
-                res = await full_analysis(sym, sig_type, channel_oi)
-                msg = format_result(res)
-                await send(msg)
+                res = await analyze(parsed)
+                await tg(fmt(res))
 
-                # Auto-trade if agent is active
-                if res.get("decision") != "NO TRADE":
-                    if agent_active:
-                        await execute_trade(res, balance_pct_setting)
+                if res["decision"] not in ("NO TRADE",) and not res.get("no_symbol"):
+                    if _agent_on:
+                        await execute(res, _position_pct)
                     else:
-                        await send(
-                            f"Agent is OFF - signal not traded automatically\n"
-                            f"Use /agent on to enable auto-trading\n"
-                            f"Or open Mini App to trade manually"
+                        await tg(
+                            f"Agent is OFF\n"
+                            f"Signal not traded: `{sym}`\n"
+                            f"Use /agent on to enable auto-trading"
                         )
 
             except Exception as e:
-                log.error("Analysis error %s: %s", sym, e)
-                await send(f"Analysis error for `{sym}`: {str(e)[:120]}")
+                log.error("Analysis %s: %s", sym, e)
+                await tg(f"Analysis error `{sym}`: {str(e)[:100]}")
 
         await client.run_until_disconnected()
 
     except ImportError:
-        await send("Telethon not installed - add telethon==1.34.0 to requirements.txt")
+        await tg("ERROR: telethon not installed - add telethon==1.34.0 to requirements.txt")
     except Exception as e:
         log.error("Telethon: %s", e)
-        await send(f"Channel monitor error: {str(e)[:150]}")
+        await tg(f"Channel error: {str(e)[:120]}")
 
 
-# ?? Bot commands ??????????????????????????????????????????
-
+# ?? BOT COMMANDS ??????????????????????????????????????????????????????????????
 async def cmd_start(update, ctx):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
     kb = [
         [InlineKeyboardButton("Open AXIFLOW TRADE", web_app=WebAppInfo(url=APP_URL))],
-        [InlineKeyboardButton("How it works", callback_data="about")],
+        [InlineKeyboardButton("How it works", callback_data="about"),
+         InlineKeyboardButton("API setup",    callback_data="api")],
     ]
     await update.message.reply_text(
-        "AXIFLOW TRADE v2\n\n"
-        "Monitors @OpenInterestTracker\n"
-        "Analyzes EVERY signal with full SM logic\n"
-        "Always sends result - even NO TRADE\n\n"
+        "AXIFLOW TRADE v3\n\n"
+        f"Agent: {'ON' if _agent_on else 'OFF'}\n"
+        f"Position: {_position_pct}% per trade\n\n"
         "Commands:\n"
-        "/setrisk 20  - 20% of balance per trade\n"
+        "/setrisk 20  - position size % per trade\n"
         "/agent on    - enable auto-trading\n"
         "/agent off   - disable auto-trading\n"
-        "/analyze SOLUSDT - analyze manually\n"
-        "/status      - current settings\n",
-        reply_markup=InlineKeyboardMarkup(kb)
+        "/status      - show current settings\n"
+        "/analyze APTUSDT - manual analysis\n",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
 
+
 async def cmd_setrisk(update, ctx):
-    global balance_pct_setting
+    global _position_pct
     args = ctx.args
     if not args:
-        await update.message.reply_text(f"Current: {balance_pct_setting}% per trade\nUsage: /setrisk 20")
+        await update.message.reply_text(
+            f"Current position size: {_position_pct}% per trade\n\n"
+            f"Usage: /setrisk 20\n"
+            f"This means each position uses 20% of your balance\n"
+            f"Example: $1000 balance x 20% = $200 per trade"
+        )
         return
     try:
         pct = float(args[0])
-        if not 1 <= pct <= 100:
-            raise ValueError("must be 1-100")
-        balance_pct_setting = pct
-        await update.message.reply_text(f"Position size set to {pct}% per trade")
-        await send(f"Position size updated: {pct}% of balance per trade")
+        if not (1 <= pct <= 100):
+            raise ValueError("must be between 1 and 100")
+        _position_pct = pct
+        await update.message.reply_text(
+            f"Position size set to {pct}% per trade\n"
+            f"Each trade will use {pct}% of your available balance"
+        )
+        await tg(f"Position size updated: {pct}% per trade")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Error: {e}\nUsage: /setrisk 20")
+
 
 async def cmd_agent(update, ctx):
-    global agent_active
+    global _agent_on
     args = ctx.args
     if not args:
-        await update.message.reply_text(f"Agent: {'ON' if agent_active else 'OFF'}\n/agent on\n/agent off")
+        st = "ON - auto-trading" if _agent_on else "OFF - signals only"
+        await update.message.reply_text(
+            f"Agent: {st}\n"
+            f"Position: {_position_pct}% per trade\n"
+            f"Max positions: {MAX_POSITIONS}\n\n"
+            f"/agent on  - enable\n"
+            f"/agent off - disable"
+        )
         return
-    if args[0].lower() == "on":
-        agent_active = True
-        await update.message.reply_text(f"Agent ON\nRisk per trade: {balance_pct_setting}%\nWill auto-trade all valid signals")
-        await send(f"Agent ACTIVATED\nAuto-trading ON\nRisk: {balance_pct_setting}% per trade")
-    elif args[0].lower() == "off":
-        agent_active = False
-        await update.message.reply_text("Agent OFF - analysis only, no auto-trading")
-        await send("Agent DEACTIVATED - monitoring only")
+    cmd = args[0].lower()
+    if cmd == "on":
+        _agent_on = True
+        await update.message.reply_text(
+            f"Agent ON\n"
+            f"Will auto-trade signals with confidence >= 70%\n"
+            f"Position: {_position_pct}% per trade\n"
+            f"Max {MAX_POSITIONS} simultaneous positions\n\n"
+            f"Use /setrisk N to change position size"
+        )
+        await tg(f"Agent activated - position: {_position_pct}% per trade")
+    elif cmd == "off":
+        _agent_on = False
+        await update.message.reply_text("Agent OFF - signals only, no auto-trading")
+        await tg("Agent deactivated")
+    else:
+        await update.message.reply_text("Usage: /agent on OR /agent off")
+
 
 async def cmd_status(update, ctx):
+    open_pos = [s for s, p in _positions.items() if p.get("status") == "open"]
     await update.message.reply_text(
         f"AXIFLOW Status\n\n"
-        f"Agent: {'ON - auto-trading' if agent_active else 'OFF - monitor only'}\n"
-        f"Position size: {balance_pct_setting}% per trade\n"
-        f"Channel: {MONITOR_CHANNEL}\n"
+        f"Agent: {'ON - trading' if _agent_on else 'OFF - signals only'}\n"
+        f"Position size: {_position_pct}% per trade\n"
+        f"Open positions: {len(open_pos)}/{MAX_POSITIONS}\n"
+        f"{', '.join(open_pos) if open_pos else 'none'}\n\n"
+        f"Channel: {CHANNEL}\n"
         f"Min confidence: 70%\n"
         f"Min expected move: 2%\n"
         f"Max risk per trade: 1%\n"
         f"Cooldown per symbol: 10 min\n"
-        f"Leverage formula: 40 / expected_move%\n"
-        f"Always responds - even NO TRADE"
+        f"Leverage: 40 / expected move (3x-20x)"
     )
+
 
 async def cmd_analyze(update, ctx):
     args = ctx.args
     if not args:
-        await update.message.reply_text("Usage: /analyze SOLUSDT")
+        await update.message.reply_text("Usage: /analyze APTUSDT")
         return
     sym = args[0].upper()
     if not sym.endswith("USDT"):
         sym += "USDT"
     await update.message.reply_text(f"Analyzing {sym}...")
-    try:
-        res = await full_analysis(sym, "pump", {})
-        await send(format_result(res))
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    parsed = {
+        "symbol": sym, "sig_type": "pump",
+        "msg_oi_15m": 0, "msg_oi_1h": 0,
+        "msg_price": 0,  "msg_fr": 0,
+        "price_15m_pct": 0, "raw": "",
+    }
+    res = await analyze(parsed)
+    await tg(fmt(res))
+
+
+async def cmd_positions(update, ctx):
+    open_pos = {s: p for s, p in _positions.items() if p.get("status") == "open"}
+    if not open_pos:
+        await update.message.reply_text("No open positions")
+        return
+    lines = ["Open positions:\n"]
+    for sym, p in open_pos.items():
+        dur = int((time.time() - p.get("opened", time.time())) / 60)
+        lines.append(
+            f"{sym}: {p['side']} ${p['amount']:.0f} {p['leverage']}x\n"
+            f"  Entry: ${p['entry']:.6f} | SL: ${p['sl']:.6f} | TP: ${p['tp']:.6f}\n"
+            f"  Open: {dur} min ago"
+        )
+    await update.message.reply_text("\n".join(lines))
+
 
 async def cmd_cb(update, ctx):
     q = update.callback_query
     await q.answer()
     if q.data == "about":
         await q.edit_message_text(
-            "AXIFLOW v2 - How it works:\n\n"
-            "1. Reads @OpenInterestTracker real-time\n"
-            "2. Extracts #TICKER from every message\n"
-            "3. Collects all market data:\n"
-            "   - OI, Funding, Liquidations, L/S\n"
-            "   - CVD, OB imbalance, Buy pressure\n"
-            "   - Liquidity sweeps, FVG, OB zones\n"
-            "   - Equal highs/lows (stop clusters)\n"
-            "4. Determines scenario:\n"
-            "   Continuation / Reversal / Manipulation\n"
-            "5. 4-pillar confidence (OI+CVD+Liq+Structure)\n"
-            "6. Filters: 70%+ conf, 2%+ move, <1% risk\n"
-            "7. Calculates: Entry / SL / TP1/2/3 / Leverage\n"
-            "8. ALWAYS sends result with explanation\n"
-            "9. If agent ON - opens position\n\n"
-            "/setrisk 20 | /agent on | /analyze SOLUSDT"
+            "AXIFLOW v3 - how it works:\n\n"
+            f"1. Reads {CHANNEL} in real time\n"
+            "2. Parses ticker + OI data from message\n"
+            "3. Fetches from Binance Futures:\n"
+            "   OI trend, Funding, Liquidations, L/S ratio\n"
+            "   CVD, Order Book, Equal highs/lows\n"
+            "   FVG zones, Order Blocks, Sweeps\n"
+            "4. Scores 4 pillars x25pts:\n"
+            "   OI + CVD + Liquidity + Structure\n"
+            "5. ALWAYS sends analysis (ENTER or NO)\n"
+            "6. Filters: conf>=70%, move>=2%, risk<1%\n"
+            "7. Leverage = 40 / expected move\n"
+            "8. If agent ON and conf >= 70% - trades\n\n"
+            "/agent on to start | /setrisk 20 to set size"
+        )
+    elif q.data == "api":
+        await q.edit_message_text(
+            "API Key Setup:\n\n"
+            "Bybit: bybit.com > API Management\n"
+            "Enable Read + Trade. Never Withdraw.\n\n"
+            "Binance: binance.com > API Management\n"
+            "Enable Futures. Disable Withdrawals.\n\n"
+            "Open Mini App > API tab > paste keys > connect\n"
+            "Then /agent on to start trading."
         )
 
-async def post_init(app):
+
+async def post_init(application):
     if APP_URL:
         try:
             from telegram import MenuButtonWebApp, WebAppInfo
-            await app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="AXIFLOW", web_app=WebAppInfo(url=APP_URL))
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="AXIFLOW",
+                    web_app=WebAppInfo(url=APP_URL),
+                )
             )
         except Exception as e:
             log.warning("Menu button: %s", e)
 
 
-# ?? Main ??????????????????????????????????????????????????
-
+# ?? ENTRY ?????????????????????????????????????????????????????????????????????
 def main():
     if not BOT_TOKEN:
         log.error("TELEGRAM_BOT_TOKEN not set")
         return
 
-    from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+    from telegram.ext import (
+        Application, CommandHandler, CallbackQueryHandler
+    )
 
-    log.info("AXIFLOW Bot v2 starting...")
+    log.info("AXIFLOW Bot v3 starting")
 
-    tg_app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    tg_app.add_handler(CommandHandler("start",   cmd_start))
-    tg_app.add_handler(CommandHandler("setrisk", cmd_setrisk))
-    tg_app.add_handler(CommandHandler("agent",   cmd_agent))
-    tg_app.add_handler(CommandHandler("status",  cmd_status))
-    tg_app.add_handler(CommandHandler("analyze", cmd_analyze))
-    tg_app.add_handler(CallbackQueryHandler(cmd_cb))
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("setrisk",   cmd_setrisk))
+    app.add_handler(CommandHandler("agent",     cmd_agent))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("analyze",   cmd_analyze))
+    app.add_handler(CommandHandler("positions", cmd_positions))
+    app.add_handler(CallbackQueryHandler(cmd_cb))
 
     async def run_all():
-        async with tg_app:
-            await tg_app.start()
+        async with app:
+            await app.start()
             await asyncio.gather(
-                tg_app.updater.start_polling(),
-                run_telethon(),
+                app.updater.start_polling(),
+                run_channel(),
             )
-            await tg_app.updater.stop()
-            await tg_app.stop()
+            await app.updater.stop()
+            await app.stop()
 
     asyncio.run(run_all())
 
